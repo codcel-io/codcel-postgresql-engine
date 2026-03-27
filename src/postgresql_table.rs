@@ -2732,14 +2732,23 @@ impl CodcelTable for PostgreSQLTable {
 
         // Aggregate query: returns a single scalar value
         if let Some(ref agg) = modifiers.aggregate {
-            let agg_col = if matches!(agg, SqlAggregate::Count) {
-                "*".to_string()
+            let select_expr = if matches!(agg, SqlAggregate::Count | SqlAggregate::CountA) {
+                "COUNT(*)".to_string()
             } else {
-                qident(&selected_cols[0])
+                // Filter to numeric columns only, matching Excel behavior of ignoring text
+                let numeric_cols: Vec<String> = selected_cols.iter()
+                    .filter(|col| column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .map(|col| qident(col))
+                    .collect();
+                if numeric_cols.is_empty() {
+                    format!("{}({})", agg.sql_function(), qident(&selected_cols[0]))
+                } else {
+                    agg.build_aggregate_select(&numeric_cols)
+                }
             };
             let sql_query = format!(
-                "SELECT {}({}) FROM {} WHERE {}",
-                agg.sql_function(), agg_col, quoted_table, where_condition
+                "SELECT {} FROM {} WHERE {}",
+                select_expr, quoted_table, where_condition
             );
             let row: PgRow = sqlx::query(&sql_query).fetch_one(&self.db).await?;
             let result: Option<f64> = row.try_get(0)?;
@@ -2838,14 +2847,23 @@ impl CodcelTable for PostgreSQLTable {
 
         // Aggregate query
         if let Some(ref agg) = modifiers.aggregate {
-            let agg_col = if matches!(agg, SqlAggregate::Count) {
-                "*".to_string()
+            let select_expr = if matches!(agg, SqlAggregate::Count | SqlAggregate::CountA) {
+                "COUNT(*)".to_string()
             } else {
-                qident(&selected_cols[0])
+                let column_types = self.get_abstract_column_types();
+                let numeric_cols: Vec<String> = selected_cols.iter()
+                    .filter(|col| column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .map(|col| qident(col))
+                    .collect();
+                if numeric_cols.is_empty() {
+                    format!("{}({})", agg.sql_function(), qident(&selected_cols[0]))
+                } else {
+                    agg.build_aggregate_select(&numeric_cols)
+                }
             };
             let sql_query = format!(
-                "SELECT {}({}) FROM {}",
-                agg.sql_function(), agg_col, quoted_table
+                "SELECT {} FROM {}",
+                select_expr, quoted_table
             );
             let row: PgRow = sqlx::query(&sql_query).fetch_one(&self.db).await?;
             let result: Option<f64> = row.try_get(0)?;
