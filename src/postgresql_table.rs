@@ -2737,7 +2737,7 @@ impl CodcelTable for PostgreSQLTable {
             } else {
                 // Filter to numeric columns only, matching Excel behavior of ignoring text
                 let numeric_cols: Vec<String> = selected_cols.iter()
-                    .filter(|col| column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .filter(|col| column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .map(|col| qident(col))
                     .collect();
                 if numeric_cols.is_empty() {
@@ -2852,7 +2852,7 @@ impl CodcelTable for PostgreSQLTable {
             } else {
                 let column_types = self.get_abstract_column_types();
                 let numeric_cols: Vec<String> = selected_cols.iter()
-                    .filter(|col| column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .filter(|col| column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .map(|col| qident(col))
                     .collect();
                 if numeric_cols.is_empty() {
