@@ -698,7 +698,7 @@ impl CodcelTable for PostgreSQLTable {
         } else {
             Err(format!(
                 "VLOOKUP: Search value {lookup_value} does not exist at column {:} for table {}",
-                &result_column_index, &self.table_name
+                result_column_index, self.table_name
             )
             .into())
         }
@@ -746,7 +746,7 @@ impl CodcelTable for PostgreSQLTable {
             let col = self.column_by_column_name(column).ok_or_else(|| {
                 format!(
                     "MATCH: Column {column} does not exist for table {}",
-                    &self.table_name
+                    self.table_name
                 )
             })?;
 
@@ -983,7 +983,7 @@ impl CodcelTable for PostgreSQLTable {
 
         Err(format!(
             "MATCH: Search value {match_value} does not exist for table {} and match type {}",
-            &self.table_name, match_type
+            self.table_name, match_type
         )
         .into())
     }
@@ -1069,7 +1069,7 @@ impl CodcelTable for PostgreSQLTable {
                 if col_idx <= 0 || (col_idx as usize) > data_cols_len {
                     return Err(format!(
                         "Index: Row {row} and column {col_idx} position does not exist for table {}",
-                        &self.table_name
+                        self.table_name
                     )
                     .into());
                 }
@@ -1341,7 +1341,7 @@ impl CodcelTable for PostgreSQLTable {
                 if col_idx <= 0 || (col_idx as usize) > data_cols_len {
                     return Err(format!(
                         "Index: Row {row} and column {col_idx} position does not exist for table {}",
-                        &self.table_name
+                        self.table_name
                     )
                     .into());
                 }
@@ -1472,7 +1472,7 @@ impl CodcelTable for PostgreSQLTable {
                 if row <= 0 || (row as usize) > data_cols_len {
                     return Err(format!(
                         "Index: Row {row} and column none position does not exist for table {}",
-                        &self.table_name
+                        self.table_name
                     )
                     .into());
                 }
@@ -1506,7 +1506,7 @@ impl CodcelTable for PostgreSQLTable {
         Err(format!(
             "Index: Row {row} and column {col} position does not exist for table {tbl}",
             col = col_desc,
-            tbl = &self.table_name
+            tbl = self.table_name
         )
         .into())
     }
@@ -1572,7 +1572,7 @@ impl CodcelTable for PostgreSQLTable {
 
         Err(format!(
             "HLOOKUP: Search value {lookup_value} does not exist at row {row_index} for table {}",
-            &self.table_name
+            self.table_name
         )
         .into())
     }
@@ -2018,7 +2018,7 @@ impl CodcelTable for PostgreSQLTable {
         } else {
             Err(format!(
                 "XSEARCH: Search value {} does not exist for table {}",
-                lookup_value, &self.table_name
+                lookup_value, self.table_name
             )
             .into())
         }
@@ -2126,7 +2126,7 @@ impl CodcelTable for PostgreSQLTable {
             let col = self.column_by_column_name(column).ok_or_else(|| {
                 format!(
                     "XMATCH: Column {column} does not exist for table {}",
-                    &self.table_name
+                    self.table_name
                 )
             })?;
 
@@ -2220,7 +2220,7 @@ impl CodcelTable for PostgreSQLTable {
 
             return Err(format!(
                 "XMATCH: Search value {match_value} does not exist for table {}",
-                &self.table_name
+                self.table_name
             )
             .into());
         }
@@ -2425,7 +2425,7 @@ impl CodcelTable for PostgreSQLTable {
 
         Err(format!(
             "XMATCH: Search value {match_value} does not exist for table {}",
-            &self.table_name
+            self.table_name
         )
         .into())
     }
