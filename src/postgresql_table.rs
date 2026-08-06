@@ -25,7 +25,7 @@ use codcel_calculation_engine::input::Input;
 use codcel_calculation_engine::value::Value;
 use codcel_calculation_engine::value_format::ValueFormat;
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
-use sqlx::{Arguments, Executor, Row};
+use sqlx::{Arguments, AssertSqlSafe, Executor, Row};
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
@@ -111,20 +111,20 @@ fn pg_type_to_column_type(pg_type: &PostgreSqlColumnType) -> ColumnType {
 pub struct PreparedQueryTemplates {
     /// SELECT {all_cols} FROM {table} - for fetching all columns.
     #[allow(dead_code)]
-    select_all: String,
+    select_all: Arc<str>,
     /// SELECT {all_cols} FROM {table} LIMIT 1 OFFSET $1 - for row-by-index access.
     #[allow(dead_code)]
-    select_row_by_offset: String,
+    select_row_by_offset: Arc<str>,
     /// SELECT COUNT(*) FROM {table} - for row counting.
-    count_rows: String,
+    count_rows: Arc<str>,
     /// INSERT INTO {table} ({cols}) VALUES ({placeholders}) - for adding rows.
-    insert_row: String,
+    insert_row: Arc<str>,
     /// UPDATE {table} SET {col=$n, ...} WHERE {id_col} = ${n+1} - for updating rows.
-    update_row: String,
+    update_row: Arc<str>,
     /// DELETE FROM {table} WHERE {id_col} = $1 - for deleting rows.
-    delete_row: String,
+    delete_row: Arc<str>,
     /// SELECT {all_cols} FROM {table} WHERE {id_col} = $1 - for reading a single row by ID.
-    read_row: String,
+    read_row: Arc<str>,
 }
 
 /// A PostgreSQL-backed table that implements Excel-like lookup and filter operations.
@@ -393,13 +393,13 @@ impl PostgreSQLTable {
         );
 
         PreparedQueryTemplates {
-            select_all,
-            select_row_by_offset,
-            count_rows,
-            insert_row,
-            update_row,
-            delete_row,
-            read_row,
+            select_all: select_all.into(),
+            select_row_by_offset: select_row_by_offset.into(),
+            count_rows: count_rows.into(),
+            insert_row: insert_row.into(),
+            update_row: update_row.into(),
+            delete_row: delete_row.into(),
+            read_row: read_row.into(),
         }
     }
 
@@ -679,7 +679,7 @@ impl CodcelTable for PostgreSQLTable {
         args.reserve(1, 0);
         let _ = args.add(lookup_value);
 
-        let row = sqlx::query_with(&sql_query, args)
+        let row = sqlx::query_with(AssertSqlSafe(sql_query), args)
             .fetch_optional(&self.db)
             .await?;
 
@@ -801,7 +801,7 @@ impl CodcelTable for PostgreSQLTable {
                 )
             };
 
-            let row_opt: Option<i64> = sqlx::query_scalar(&sql_query)
+            let row_opt: Option<i64> = sqlx::query_scalar(AssertSqlSafe(sql_query))
                 .bind(bind_val)
                 .fetch_optional(&self.db)
                 .await?;
@@ -832,7 +832,7 @@ impl CodcelTable for PostgreSQLTable {
                 cols = quoted_cols
             );
 
-            let row_pg = sqlx::query(&sql_query)
+            let row_pg = sqlx::query(AssertSqlSafe(sql_query))
                 .bind((row - 1) as i64) // Convert 1-based row to 0-based offset
                 .fetch_optional(&self.db)
                 .await?;
@@ -1080,7 +1080,9 @@ impl CodcelTable for PostgreSQLTable {
                     col = quoted_col,
                     tbl = quoted_table
                 );
-                let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+                let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+                    .fetch_all(&self.db)
+                    .await?;
 
                 // Map all rows for this single column
                 let mut out: Vec<Value> = Vec::new();
@@ -1165,7 +1167,9 @@ impl CodcelTable for PostgreSQLTable {
                     cols = all_cols_str,
                     tbl = quoted_table
                 );
-                let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+                let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+                    .fetch_all(&self.db)
+                    .await?;
 
                 // Build a column-major flattened vector - first collect all values (with error handling)
                 let mut raw_vals: Vec<Value> = Vec::with_capacity(rows.len() * data_cols_len);
@@ -1255,7 +1259,7 @@ impl CodcelTable for PostgreSQLTable {
                     cols = all_cols_str,
                     tbl = quoted_table
                 );
-                if let Some(rowv) = sqlx::query(&sql_query)
+                if let Some(rowv) = sqlx::query(AssertSqlSafe(sql_query))
                     .bind(row - 1) // Convert 1-based row to 0-based offset
                     .fetch_optional(&self.db)
                     .await?
@@ -1352,7 +1356,7 @@ impl CodcelTable for PostgreSQLTable {
                     col = quoted_col,
                     tbl = quoted_table
                 );
-                if let Some(rowv) = sqlx::query(&sql_query)
+                if let Some(rowv) = sqlx::query(AssertSqlSafe(sql_query))
                     .bind(row - 1) // Convert 1-based row to 0-based offset
                     .fetch_optional(&self.db)
                     .await?
@@ -1373,7 +1377,8 @@ impl CodcelTable for PostgreSQLTable {
             // If there are multiple rows, return the entire row at index `row`.
             // If there is only one row, treat `row` as the column index and return that cell from the first row.
             // Use pre-built query template for better prepared statement caching
-            let number_rows: i64 = sqlx::query_scalar(&self.query_templates.count_rows)
+            let count_rows_sql = Arc::clone(&self.query_templates.count_rows);
+            let number_rows: i64 = sqlx::query_scalar(AssertSqlSafe(count_rows_sql))
                 .fetch_one(&self.db)
                 .await?;
             if number_rows > 1 {
@@ -1386,7 +1391,7 @@ impl CodcelTable for PostgreSQLTable {
                     cols = all_cols_str,
                     tbl = quoted_table
                 );
-                if let Some(rowv) = sqlx::query(&sql_query)
+                if let Some(rowv) = sqlx::query(AssertSqlSafe(sql_query))
                     .bind(row - 1) // Convert 1-based row to 0-based offset
                     .fetch_optional(&self.db)
                     .await?
@@ -1483,7 +1488,10 @@ impl CodcelTable for PostgreSQLTable {
                     col = quoted_col,
                     tbl = quoted_table
                 );
-                if let Some(rowv) = sqlx::query(&sql_query).fetch_optional(&self.db).await? {
+                if let Some(rowv) = sqlx::query(AssertSqlSafe(sql_query))
+                    .fetch_optional(&self.db)
+                    .await?
+                {
                     let val = self.get_value_at_column_name_pos(&Some(rowv), col_name, 0)?;
                     let val = PostgreSQLTable::apply_table_functions_to_value(
                         val,
@@ -1736,7 +1744,7 @@ impl CodcelTable for PostgreSQLTable {
                     .filter(|s| !s.is_empty())
                     .collect();
 
-                let row_opt = sqlx::query(&sql_query).fetch_optional(&self.db).await?;
+                let row_opt = sqlx::query(AssertSqlSafe(sql_query)).fetch_optional(&self.db).await?;
                 if let Some(row) = row_opt {
                     return if selected_cols.len() == 1 {
                         let mut v =
@@ -1800,7 +1808,7 @@ impl CodcelTable for PostgreSQLTable {
                 self.get_quoted_table_name(),
                 self.get_quoted_column_name("c0")
             );
-            let row_opt = sqlx::query(&sql_query)
+            let row_opt = sqlx::query(AssertSqlSafe(sql_query))
                 .bind(row_num)
                 .fetch_optional(&self.db)
                 .await?;
@@ -1983,7 +1991,7 @@ impl CodcelTable for PostgreSQLTable {
                         self.get_quoted_table_name(),
                         self.get_quoted_column_name("c0")
                     );
-                    let rows: Vec<PgRow> = sqlx::query(&sql_query)
+                    let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
                         .bind(row_num)
                         .fetch_all(&self.db)
                         .await?;
@@ -2209,7 +2217,7 @@ impl CodcelTable for PostgreSQLTable {
             };
 
             if !sql_query.is_empty() {
-                let rn_opt: Option<i64> = sqlx::query_scalar(&sql_query)
+                let rn_opt: Option<i64> = sqlx::query_scalar(AssertSqlSafe(sql_query))
                     .bind(bind_val)
                     .fetch_optional(&self.db)
                     .await?;
@@ -2235,7 +2243,7 @@ impl CodcelTable for PostgreSQLTable {
             cols = quoted_cols
         );
 
-        let row_pg = sqlx::query(&sql_query)
+        let row_pg = sqlx::query(AssertSqlSafe(sql_query))
             .bind((row - 1) as i64) // Convert 1-based row to 0-based offset
             .fetch_optional(&self.db)
             .await?;
@@ -2476,7 +2484,7 @@ impl CodcelTable for PostgreSQLTable {
         );
 
         // Execute query and collect all rows
-        let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
 
         // Prepare list of selected columns to know how to map result types by name
         let selected_cols: Vec<String> = columns
@@ -2607,7 +2615,7 @@ impl CodcelTable for PostgreSQLTable {
         let sql_query = format!("SELECT {columns} FROM {quoted_table}");
 
         // Execute query and collect all rows
-        let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
 
         // Prepare list of selected columns to know how to map result types by name
         let selected_cols: Vec<String> = columns
@@ -2750,7 +2758,7 @@ impl CodcelTable for PostgreSQLTable {
                 "SELECT {} FROM {} WHERE {}",
                 select_expr, quoted_table, where_condition
             );
-            let row: PgRow = sqlx::query(&sql_query).fetch_one(&self.db).await?;
+            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query)).fetch_one(&self.db).await?;
             let result: Option<f64> = row.try_get(0)?;
             return Ok(Value::F64(result.unwrap_or(0.0)));
         }
@@ -2761,7 +2769,7 @@ impl CodcelTable for PostgreSQLTable {
             "SELECT {select_prefix}{quoted_columns} FROM {quoted_table} WHERE {where_condition}{order_clause}{limit_clause}"
         );
 
-        let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
 
         let mut area: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         for row in rows.into_iter() {
@@ -2865,7 +2873,7 @@ impl CodcelTable for PostgreSQLTable {
                 "SELECT {} FROM {}",
                 select_expr, quoted_table
             );
-            let row: PgRow = sqlx::query(&sql_query).fetch_one(&self.db).await?;
+            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query)).fetch_one(&self.db).await?;
             let result: Option<f64> = row.try_get(0)?;
             return Ok(Value::F64(result.unwrap_or(0.0)));
         }
@@ -2875,7 +2883,7 @@ impl CodcelTable for PostgreSQLTable {
             "SELECT {select_prefix}{quoted_columns} FROM {quoted_table}{order_clause}{limit_clause}"
         );
 
-        let rows: Vec<PgRow> = sqlx::query(&sql_query).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
 
         let mut area: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         for row in rows.into_iter() {
@@ -3004,7 +3012,7 @@ impl CodcelTable for PostgreSQLTable {
         let sql_arguments = self.get_add_row_arguments(&values, value_format, &id)?;
 
         // Use pre-built query template for better prepared statement caching
-        sqlx::query_with(&self.query_templates.insert_row, sql_arguments)
+        sqlx::query_with(AssertSqlSafe(Arc::clone(&self.query_templates.insert_row)), sql_arguments)
             .execute(&self.db)
             .await?;
 
@@ -3063,7 +3071,8 @@ impl CodcelTable for PostgreSQLTable {
         let _ = args.add(&id);
 
         // Use pre-built query template for better prepared statement caching
-        let result = sqlx::query_with(&self.query_templates.update_row, args)
+        let update_row_sql = Arc::clone(&self.query_templates.update_row);
+        let result = sqlx::query_with(AssertSqlSafe(update_row_sql), args)
             .execute(&self.db)
             .await?;
 
@@ -3112,7 +3121,8 @@ impl CodcelTable for PostgreSQLTable {
         let _ = args.add(id);
 
         // Use pre-built query template for better prepared statement caching
-        let result = sqlx::query_with(&self.query_templates.delete_row, args)
+        let delete_row_sql = Arc::clone(&self.query_templates.delete_row);
+        let result = sqlx::query_with(AssertSqlSafe(delete_row_sql), args)
             .execute(&self.db)
             .await?;
 
@@ -3160,7 +3170,7 @@ impl CodcelTable for PostgreSQLTable {
         let mut args = PgArguments::default();
         args.reserve(1, 0);
         let _ = args.add(id);
-        let row = sqlx::query_with(&self.query_templates.read_row, args)
+        let row = sqlx::query_with(AssertSqlSafe(Arc::clone(&self.query_templates.read_row)), args)
             .fetch_optional(&self.db)
             .await?;
 
@@ -3258,7 +3268,7 @@ async fn create_database(
     // Attempt to create the database directly and handle "already exists" error gracefully.
     // This avoids TOCTOU race conditions from check-then-create patterns.
     let create = format!(r#"CREATE DATABASE "{}""#, db_name.replace('"', "\"\""));
-    match pool.execute(create.as_str()).await {
+    match pool.execute(AssertSqlSafe(create)).await {
         Ok(_) => Ok(()),
         Err(e) => {
             // Check if error is "duplicate_database" (PostgreSQL error code 42P04)
@@ -3270,5 +3280,584 @@ async fn create_database(
             }
             Err(e.into())
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codcel_table_engine::table_functions::{ParamTableFunctionType, TableFunctionType};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// A fixed `ValueFormat` built by struct literal rather than `from_system_with_env`,
+    /// so the tests do not depend on the host locale or on `CODCEL_*` environment variables.
+    fn vf() -> ValueFormat {
+        ValueFormat {
+            decimal_separator: ".".to_string(),
+            currency_symbol: String::new(),
+            thousands_separator: ",".to_string(),
+            use_excel_rounding: false,
+            language: "en".to_string(),
+            allow_lotus_1_2_3_1900_date_bug: true,
+        }
+    }
+
+    fn col(name: &str, sql_type: PostgreSqlColumnType) -> PostgresSqlColumn {
+        PostgresSqlColumn {
+            column_name: name.to_string(),
+            sql_type,
+            nullable: false,
+        }
+    }
+
+    /// c0 TEXT (the id column), c1 INTEGER, c2 DOUBLE PRECISION.
+    fn cols3() -> Vec<PostgresSqlColumn> {
+        vec![
+            col("c0", PostgreSqlColumnType::Text),
+            col("c1", PostgreSqlColumnType::Integer),
+            col("c2", PostgreSqlColumnType::DoublePrecision),
+        ]
+    }
+
+    /// Build templates the same way `init` does, from a column list.
+    fn templates_for(columns: &[PostgresSqlColumn]) -> PreparedQueryTemplates {
+        let quoted_table = qident("t");
+        let quoted_cols = PostgreSQLTable::build_quoted_column_names(columns);
+        PostgreSQLTable::build_query_templates(&quoted_table, &quoted_cols, columns)
+    }
+
+    fn modifiers() -> SqlModifiers {
+        SqlModifiers::default()
+    }
+
+    // ── qident ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn qident_wraps_in_double_quotes() {
+        assert_eq!(qident("abc"), "\"abc\"");
+    }
+
+    #[test]
+    fn qident_doubles_embedded_quotes() {
+        // This is the injection defence: an embedded `"` cannot terminate the identifier.
+        assert_eq!(qident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(qident("\"; DROP TABLE x --"), "\"\"\"; DROP TABLE x --\"");
+    }
+
+    #[test]
+    fn qident_treats_a_dot_as_part_of_the_name() {
+        // A dotted name becomes ONE identifier, not schema.table.
+        // `build_create_table_sql` relies on this for the schema/table split it performs itself.
+        assert_eq!(qident("a.b"), "\"a.b\"");
+    }
+
+    #[test]
+    fn qident_empty_string() {
+        assert_eq!(qident(""), "\"\"");
+    }
+
+    // ── escape_sql_string ─────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_sql_string_doubles_single_quotes() {
+        assert_eq!(escape_sql_string("O'Brien"), "O''Brien");
+    }
+
+    #[test]
+    fn escape_sql_string_is_not_idempotent() {
+        // Escaping twice keeps doubling — callers must escape exactly once.
+        assert_eq!(escape_sql_string("a''b"), "a''''b");
+    }
+
+    #[test]
+    fn escape_sql_string_leaves_backslashes_alone() {
+        // Correct only while PostgreSQL runs with standard_conforming_strings = on,
+        // where a backslash is not an escape character inside a string literal.
+        assert_eq!(escape_sql_string("a\\'b"), "a\\''b");
+    }
+
+    // ── quote_columns ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn quote_columns_single() {
+        assert_eq!(quote_columns("c1"), "\"c1\"");
+    }
+
+    #[test]
+    fn quote_columns_splits_and_trims() {
+        assert_eq!(quote_columns("c1,  c2 ,c3"), "\"c1\", \"c2\", \"c3\"");
+    }
+
+    #[test]
+    fn quote_columns_empty_input_yields_one_empty_identifier() {
+        // Produces `SELECT "" FROM ...`, which PostgreSQL rejects at parse time
+        // rather than silently selecting everything.
+        assert_eq!(quote_columns(""), "\"\"");
+    }
+
+    #[test]
+    fn quote_columns_trailing_comma_yields_trailing_empty_identifier() {
+        assert_eq!(quote_columns("c1,"), "\"c1\", \"\"");
+    }
+
+    // ── build_modifier_clauses ────────────────────────────────────────────────
+
+    #[test]
+    fn modifier_clauses_default_are_all_empty() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        assert_eq!(
+            build_modifier_clauses(&modifiers(), &cols),
+            (String::new(), String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn modifier_clauses_distinct_keeps_its_trailing_space() {
+        // The trailing space is load-bearing: callers interpolate
+        // `SELECT {select_prefix}{quoted_columns}` with no separator of their own.
+        let cols = vec!["c1".to_string()];
+        let m = SqlModifiers {
+            distinct: true,
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).0, "DISTINCT ");
+    }
+
+    #[test]
+    fn modifier_clauses_order_by_ascending() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            order_by: Some(vec![(1, false)]),
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).1, " ORDER BY \"c1\" ASC");
+    }
+
+    #[test]
+    fn modifier_clauses_order_by_descending_uses_one_based_index() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            order_by: Some(vec![(2, true)]),
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).1, " ORDER BY \"c2\" DESC");
+    }
+
+    #[test]
+    fn modifier_clauses_order_by_multiple_keys() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            order_by: Some(vec![(1, false), (2, true)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_modifier_clauses(&m, &cols).1,
+            " ORDER BY \"c1\" ASC, \"c2\" DESC"
+        );
+    }
+
+    #[test]
+    fn modifier_clauses_order_by_index_zero_falls_back_to_first_column() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            order_by: Some(vec![(0, false)]),
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).1, " ORDER BY \"c1\" ASC");
+    }
+
+    #[test]
+    fn modifier_clauses_order_by_index_past_end_falls_back_to_first_column() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            order_by: Some(vec![(9, true)]),
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).1, " ORDER BY \"c1\" DESC");
+    }
+
+    #[test]
+    fn modifier_clauses_limit_offset() {
+        let cols = vec!["c1".to_string()];
+        let m = SqlModifiers {
+            limit_offset: Some((10, 5)),
+            ..Default::default()
+        };
+        assert_eq!(build_modifier_clauses(&m, &cols).2, " LIMIT 10 OFFSET 5");
+    }
+
+    #[test]
+    fn modifier_clauses_combine_into_a_well_formed_statement() {
+        let cols = vec!["c1".to_string(), "c2".to_string()];
+        let m = SqlModifiers {
+            distinct: true,
+            order_by: Some(vec![(2, true)]),
+            limit_offset: Some((3, 0)),
+            ..Default::default()
+        };
+        let (prefix, order, limit) = build_modifier_clauses(&m, &cols);
+        // Exactly the concatenation the call sites perform.
+        assert_eq!(
+            format!("SELECT {prefix}\"c1\", \"c2\" FROM \"t\"{order}{limit}"),
+            "SELECT DISTINCT \"c1\", \"c2\" FROM \"t\" ORDER BY \"c2\" DESC LIMIT 3 OFFSET 0"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn modifier_clauses_order_by_with_no_columns_panics() {
+        // Documents current behaviour: the out-of-range fallback indexes col_list[0]
+        // unconditionally, so an empty column list panics rather than erroring.
+        let m = SqlModifiers {
+            order_by: Some(vec![(1, false)]),
+            ..Default::default()
+        };
+        let _ = build_modifier_clauses(&m, &[]);
+    }
+
+    // ── pg_type_to_column_type ────────────────────────────────────────────────
+
+    #[test]
+    fn pg_type_to_column_type_is_exhaustive() {
+        use PostgreSqlColumnType as P;
+        assert_eq!(pg_type_to_column_type(&P::Text), ColumnType::Text);
+        assert_eq!(pg_type_to_column_type(&P::Integer), ColumnType::Integer);
+        assert_eq!(pg_type_to_column_type(&P::BigInt), ColumnType::BigInt);
+        assert_eq!(pg_type_to_column_type(&P::Real), ColumnType::Float);
+        assert_eq!(pg_type_to_column_type(&P::DoublePrecision), ColumnType::Double);
+        assert_eq!(pg_type_to_column_type(&P::Boolean), ColumnType::Boolean);
+        assert_eq!(pg_type_to_column_type(&P::Date), ColumnType::Date);
+        assert_eq!(pg_type_to_column_type(&P::Timestamp), ColumnType::Timestamp);
+        assert_eq!(pg_type_to_column_type(&P::Bytea), ColumnType::Binary);
+    }
+
+    // ── generate_placeholders ─────────────────────────────────────────────────
+
+    #[test]
+    fn generate_placeholders_zero_is_empty() {
+        assert_eq!(generate_placeholders(0), "");
+    }
+
+    #[test]
+    fn generate_placeholders_one() {
+        assert_eq!(generate_placeholders(1), "$1");
+    }
+
+    #[test]
+    fn generate_placeholders_is_one_based_and_comma_space_separated() {
+        assert_eq!(generate_placeholders(3), "$1, $2, $3");
+    }
+
+    #[test]
+    fn generate_placeholders_count_matches_length() {
+        let s = generate_placeholders(12);
+        assert_eq!(s.matches('$').count(), 12);
+        assert!(s.ends_with("$12"));
+    }
+
+    // ── build_query_templates ─────────────────────────────────────────────────
+    //
+    // These are the exact strings handed to sqlx via `AssertSqlSafe(Arc::clone(..))`.
+    // The fields are `Arc<str>`, so assertions deref with `&*`.
+
+    #[test]
+    fn query_templates_three_columns() {
+        let t = templates_for(&cols3());
+        assert_eq!(&*t.select_all, "SELECT \"c0\", \"c1\", \"c2\" FROM \"t\"");
+        assert_eq!(
+            &*t.select_row_by_offset,
+            "SELECT \"c0\", \"c1\", \"c2\" FROM \"t\" LIMIT 1 OFFSET $1"
+        );
+        assert_eq!(&*t.count_rows, "SELECT COUNT(*) FROM \"t\"");
+        assert_eq!(
+            &*t.insert_row,
+            "INSERT INTO \"t\" (\"c0\", \"c1\", \"c2\") VALUES ($1, $2, $3)"
+        );
+        assert_eq!(
+            &*t.update_row,
+            "UPDATE \"t\" SET \"c1\" = $1, \"c2\" = $2 WHERE \"c0\" = $3"
+        );
+        assert_eq!(&*t.delete_row, "DELETE FROM \"t\" WHERE \"c0\" = $1");
+        assert_eq!(
+            &*t.read_row,
+            "SELECT \"c0\", \"c1\", \"c2\" FROM \"t\" WHERE \"c0\" = $1"
+        );
+    }
+
+    #[test]
+    fn query_templates_two_columns() {
+        let cols = vec![
+            col("c0", PostgreSqlColumnType::Text),
+            col("c1", PostgreSqlColumnType::Integer),
+        ];
+        let t = templates_for(&cols);
+        assert_eq!(&*t.insert_row, "INSERT INTO \"t\" (\"c0\", \"c1\") VALUES ($1, $2)");
+        assert_eq!(&*t.update_row, "UPDATE \"t\" SET \"c1\" = $1 WHERE \"c0\" = $2");
+    }
+
+    #[test]
+    fn query_templates_single_column_produces_a_malformed_update() {
+        // Documents current behaviour: with only an id column the SET clause is empty,
+        // yielding `UPDATE "t" SET  WHERE "c0" = $1`, which PostgreSQL rejects.
+        let cols = vec![col("c0", PostgreSqlColumnType::Text)];
+        let t = templates_for(&cols);
+        assert_eq!(&*t.insert_row, "INSERT INTO \"t\" (\"c0\") VALUES ($1)");
+        assert_eq!(&*t.update_row, "UPDATE \"t\" SET  WHERE \"c0\" = $1");
+    }
+
+    #[test]
+    fn query_templates_insert_placeholder_count_matches_column_count() {
+        for n in 1..=8usize {
+            let cols: Vec<PostgresSqlColumn> = (0..n)
+                .map(|i| col(&format!("c{i}"), PostgreSqlColumnType::Text))
+                .collect();
+            let t = templates_for(&cols);
+            assert_eq!(
+                t.insert_row.matches('$').count(),
+                n,
+                "insert_row placeholder count for {n} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn query_templates_update_id_placeholder_is_the_highest_index() {
+        // The id is bound last, after every non-id value — this is the contract
+        // `bind_non_id_values` followed by `args.add(&id)` must satisfy.
+        for n in 2..=8usize {
+            let cols: Vec<PostgresSqlColumn> = (0..n)
+                .map(|i| col(&format!("c{i}"), PostgreSqlColumnType::Text))
+                .collect();
+            let t = templates_for(&cols);
+            assert!(
+                t.update_row.ends_with(&format!("= ${n}")),
+                "update_row for {n} columns should bind the id as ${n}: {}",
+                &*t.update_row
+            );
+            assert_eq!(t.update_row.matches('$').count(), n);
+        }
+    }
+
+    #[test]
+    fn query_templates_quote_identifiers_needing_escapes() {
+        let cols = vec![
+            col("id\"col", PostgreSqlColumnType::Text),
+            col("we ird", PostgreSqlColumnType::Integer),
+        ];
+        let t = templates_for(&cols);
+        assert_eq!(
+            &*t.read_row,
+            "SELECT \"id\"\"col\", \"we ird\" FROM \"t\" WHERE \"id\"\"col\" = $1"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn query_templates_with_no_columns_panics() {
+        // Documents current behaviour: the id column is read as `quoted_column_names[0]`.
+        let _ = templates_for(&[]);
+    }
+
+    // ── build_column_cache / build_quoted_column_names ────────────────────────
+
+    #[test]
+    fn column_cache_maps_names_to_ordinals() {
+        let cache = PostgreSQLTable::build_column_cache(&cols3());
+        assert_eq!(cache.get("c0"), Some(&0));
+        assert_eq!(cache.get("c1"), Some(&1));
+        assert_eq!(cache.get("c2"), Some(&2));
+    }
+
+    #[test]
+    fn column_cache_misses_are_none() {
+        let cache = PostgreSQLTable::build_column_cache(&cols3());
+        assert_eq!(cache.get("nope"), None);
+    }
+
+    #[test]
+    fn column_cache_duplicate_names_keep_the_last_ordinal() {
+        // Documents current behaviour: a duplicated name silently resolves to the
+        // LAST occurrence, so lookups can address the wrong column.
+        let cols = vec![
+            col("dup", PostgreSqlColumnType::Text),
+            col("other", PostgreSqlColumnType::Integer),
+            col("dup", PostgreSqlColumnType::Integer),
+        ];
+        let cache = PostgreSQLTable::build_column_cache(&cols);
+        assert_eq!(cache.get("dup"), Some(&2));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.len() < cols.len());
+    }
+
+    #[test]
+    fn quoted_column_names_preserve_order_and_quote() {
+        assert_eq!(
+            PostgreSQLTable::build_quoted_column_names(&cols3()),
+            vec!["\"c0\"", "\"c1\"", "\"c2\""]
+        );
+    }
+
+    #[test]
+    fn quoted_column_names_empty_input() {
+        assert!(PostgreSQLTable::build_quoted_column_names(&[]).is_empty());
+    }
+
+    // ── apply_table_functions_to_value ────────────────────────────────────────
+    //
+    // Async but IO-free, so `futures::executor::block_on` suffices — no reactor,
+    // and no tokio dev-dependency. `TableFunctionType` is a bare `fn` pointer,
+    // so the fixtures below must be free functions rather than closures.
+
+    type Fut = Pin<Box<dyn Future<Output = Result<Value, Box<dyn Error + Send + Sync>>> + Send>>;
+
+    fn tf_ok(_input: Arc<Input>) -> Fut {
+        Box::pin(async { Ok(Value::String("CALLED".to_string())) })
+    }
+
+    fn tf_err(_input: Arc<Input>) -> Fut {
+        Box::pin(async { Err(Box::<dyn Error + Send + Sync>::from("boom")) })
+    }
+
+    fn tf_params(_input: Arc<Input>, params: Vec<Value>) -> Fut {
+        Box::pin(async move { Ok(Value::String(format!("{params:?}"))) })
+    }
+
+    fn fns(name: &str, f: TableFunctionType) -> TableFunctions {
+        let mut map = HashMap::new();
+        map.insert(name.to_string(), f);
+        TableFunctions {
+            functions: Some(map),
+            param_functions: None,
+        }
+    }
+
+    fn param_fns(name: &str, f: ParamTableFunctionType) -> TableFunctions {
+        let mut map = HashMap::new();
+        map.insert(name.to_string(), f);
+        TableFunctions {
+            functions: None,
+            param_functions: Some(map),
+        }
+    }
+
+    /// Apply the marker expansion and render the result as a string.
+    fn apply(text: &str, tfs: &TableFunctions) -> String {
+        let fmt = vf();
+        let input = Input::new("test", fmt.clone());
+        let out = futures::executor::block_on(PostgreSQLTable::apply_table_functions_to_value(
+            Value::String(text.to_string()),
+            tfs,
+            &input,
+            &fmt,
+        ));
+        out.string(&fmt).unwrap()
+    }
+
+    #[test]
+    fn table_functions_plain_value_passes_through() {
+        assert_eq!(apply("hello", &TableFunctions::none()), "hello");
+    }
+
+    #[test]
+    fn table_functions_marker_without_any_registry_passes_through() {
+        assert_eq!(apply("*F*anything", &TableFunctions::none()), "*F*anything");
+        assert_eq!(apply("*P*anything", &TableFunctions::none()), "*P*anything");
+    }
+
+    #[test]
+    fn table_functions_unknown_name_passes_through() {
+        assert_eq!(apply("*F*missing", &fns("ok", tf_ok)), "*F*missing");
+    }
+
+    #[test]
+    fn table_functions_known_name_is_invoked() {
+        assert_eq!(apply("*F*ok", &fns("ok", tf_ok)), "CALLED");
+    }
+
+    #[test]
+    fn table_functions_error_is_swallowed_and_original_returned() {
+        // Documents current behaviour: a failing table function is indistinguishable
+        // from an unregistered one — the raw marker text reaches the caller.
+        assert_eq!(apply("*F*bad", &fns("bad", tf_err)), "*F*bad");
+    }
+
+    #[test]
+    fn param_functions_parse_integers_before_floats() {
+        assert_eq!(
+            apply("*P*tpl:1:2", &param_fns("tpl", tf_params)),
+            "[I32(1), I32(2)]"
+        );
+    }
+
+    #[test]
+    fn param_functions_parse_floats() {
+        assert_eq!(apply("*P*tpl:1.5", &param_fns("tpl", tf_params)), "[F64(1.5)]");
+    }
+
+    #[test]
+    fn param_functions_fall_back_to_string() {
+        assert_eq!(
+            apply("*P*tpl:abc", &param_fns("tpl", tf_params)),
+            "[String(\"abc\")]"
+        );
+    }
+
+    #[test]
+    fn param_functions_magnitude_changes_the_parameter_type() {
+        // Documents a real trap: the i32-then-f64 ladder means the SAME template
+        // receives I32 or F64 depending purely on the constant's magnitude.
+        assert_eq!(
+            apply("*P*tpl:2147483647", &param_fns("tpl", tf_params)),
+            "[I32(2147483647)]"
+        );
+        assert_eq!(
+            apply("*P*tpl:2147483648", &param_fns("tpl", tf_params)),
+            "[F64(2147483648.0)]"
+        );
+        assert_eq!(
+            apply("*P*tpl:1e3", &param_fns("tpl", tf_params)),
+            "[F64(1000.0)]"
+        );
+    }
+
+    #[test]
+    fn param_functions_empty_segments_silently_shrink_the_arity() {
+        // Documents current behaviour: empty segments are filtered out, so a template
+        // expecting two parameters receives one, with no error.
+        assert_eq!(apply("*P*tpl:1:", &param_fns("tpl", tf_params)), "[I32(1)]");
+        assert_eq!(apply("*P*tpl::2", &param_fns("tpl", tf_params)), "[I32(2)]");
+    }
+
+    #[test]
+    fn param_functions_no_constants_yields_no_parameters() {
+        assert_eq!(apply("*P*tpl", &param_fns("tpl", tf_params)), "[]");
+    }
+
+    #[test]
+    fn param_functions_unknown_template_passes_through() {
+        assert_eq!(
+            apply("*P*missing:1", &param_fns("tpl", tf_params)),
+            "*P*missing:1"
+        );
+    }
+
+    #[test]
+    fn table_functions_non_string_values_pass_through_unchanged() {
+        let fmt = vf();
+        let input = Input::new("test", fmt.clone());
+        let out = futures::executor::block_on(PostgreSQLTable::apply_table_functions_to_value(
+            Value::F64(1.5),
+            &fns("ok", tf_ok),
+            &input,
+            &fmt,
+        ));
+        assert_eq!(format!("{out:?}"), "F64(1.5)");
     }
 }

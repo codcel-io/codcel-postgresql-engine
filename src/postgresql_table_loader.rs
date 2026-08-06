@@ -9,7 +9,7 @@ use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::*;
 use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::prelude::*;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use uuid::Uuid;
@@ -269,7 +269,7 @@ async fn ensure_table_from_parquet_core(
     // 4) Create table if missing (uses IF NOT EXISTS to handle race conditions gracefully)
     if table_missing {
         let create_sql = build_create_table_sql(table_name, &pg_cols, unique_columns)?;
-        sqlx::query(&create_sql)
+        sqlx::query(AssertSqlSafe(create_sql))
             .execute(db)
             .await
             .context("creating table from parquet schema")?;
@@ -533,9 +533,9 @@ async fn insert_t_all_rows(
 
 
 // Bind Arrow value at `idx` to the SQL query builder
-fn bind_arrow_value<'a>(
-    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
-    array: &'a dyn Array,
+fn bind_arrow_value(
+    qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    array: &dyn Array,
     idx: usize,
 ) -> anyhow::Result<()> {
     use DataType::*;
@@ -710,4 +710,594 @@ async fn register_parquet_and_table(path: &str, table_name: &str) -> Result<Data
         .await
         .with_context(|| format!("register_parquet({path})"))?;
     Ok(ctx.table(table_name).await?)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{Postgres, QueryBuilder};
+    use std::sync::Arc;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn col(name: &str, sql_type: PostgreSqlColumnType, nullable: bool) -> PostgresSqlColumn {
+        PostgresSqlColumn {
+            column_name: name.to_string(),
+            sql_type,
+            nullable,
+        }
+    }
+
+    /// `PostgreSqlColumnType` derives no `PartialEq`, so compare via the SQL spelling.
+    fn ty(c: &PostgresSqlColumn) -> &'static str {
+        c.sql_type.as_str()
+    }
+
+    fn schema_of(fields: &[(&str, DataType, bool)]) -> Schema {
+        Schema::new(
+            fields
+                .iter()
+                .map(|(name, dt, nullable)| Field::new(*name, dt.clone(), *nullable))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Bind one Arrow value into a fresh builder and return the SQL fragment emitted.
+    fn bind_one(array: &dyn Array, idx: usize) -> Result<String> {
+        let mut qb = QueryBuilder::<Postgres>::new("");
+        bind_arrow_value(&mut qb, array, idx)?;
+        Ok(qb.into_string())
+    }
+
+    // ── PostgreSqlColumnType: as_str / Display / FromStr ──────────────────────
+
+    const ALL_TYPES: [PostgreSqlColumnType; 9] = [
+        PostgreSqlColumnType::Integer,
+        PostgreSqlColumnType::BigInt,
+        PostgreSqlColumnType::Real,
+        PostgreSqlColumnType::DoublePrecision,
+        PostgreSqlColumnType::Boolean,
+        PostgreSqlColumnType::Text,
+        PostgreSqlColumnType::Bytea,
+        PostgreSqlColumnType::Date,
+        PostgreSqlColumnType::Timestamp,
+    ];
+
+    #[test]
+    fn column_type_as_str_is_exhaustive() {
+        use PostgreSqlColumnType as P;
+        assert_eq!(P::Integer.as_str(), "INTEGER");
+        assert_eq!(P::BigInt.as_str(), "BIGINT");
+        assert_eq!(P::Real.as_str(), "REAL");
+        assert_eq!(P::DoublePrecision.as_str(), "DOUBLE PRECISION");
+        assert_eq!(P::Boolean.as_str(), "BOOLEAN");
+        assert_eq!(P::Text.as_str(), "TEXT");
+        assert_eq!(P::Bytea.as_str(), "BYTEA");
+        assert_eq!(P::Date.as_str(), "DATE");
+        assert_eq!(P::Timestamp.as_str(), "TIMESTAMP");
+    }
+
+    #[test]
+    fn column_type_display_matches_as_str() {
+        for t in ALL_TYPES {
+            assert_eq!(t.to_string(), t.as_str());
+        }
+    }
+
+    #[test]
+    fn column_type_round_trips_through_from_str() {
+        // This is the exact round-trip `get_postgresql_columns` performs:
+        // `pg_type_from_arrow` returns a &str which is immediately `.parse()`d.
+        for t in ALL_TYPES {
+            let parsed: PostgreSqlColumnType = t.as_str().parse().unwrap();
+            assert_eq!(parsed.as_str(), t.as_str());
+        }
+    }
+
+    #[test]
+    fn column_type_from_str_is_case_insensitive_and_end_trimmed() {
+        let parsed: PostgreSqlColumnType = "  double precision  ".parse().unwrap();
+        assert_eq!(parsed.as_str(), "DOUBLE PRECISION");
+        let parsed: PostgreSqlColumnType = "BiGiNt".parse().unwrap();
+        assert_eq!(parsed.as_str(), "BIGINT");
+    }
+
+    #[test]
+    fn column_type_from_str_rejects_unknown_with_exact_message() {
+        let err = "VARCHAR".parse::<PostgreSqlColumnType>().unwrap_err();
+        assert_eq!(err, "Unknown column type: VARCHAR");
+    }
+
+    #[test]
+    fn column_type_from_str_does_not_collapse_interior_whitespace() {
+        // Only leading/trailing whitespace is stripped, so a doubled interior space fails.
+        assert!("DOUBLE  PRECISION".parse::<PostgreSqlColumnType>().is_err());
+    }
+
+    // ── pg_type_from_arrow ────────────────────────────────────────────────────
+
+    #[test]
+    fn arrow_to_pg_type_mapping() {
+        assert_eq!(pg_type_from_arrow(&DataType::Int8), "INTEGER");
+        assert_eq!(pg_type_from_arrow(&DataType::Int16), "INTEGER");
+        assert_eq!(pg_type_from_arrow(&DataType::Int32), "INTEGER");
+        assert_eq!(pg_type_from_arrow(&DataType::Int64), "BIGINT");
+        assert_eq!(pg_type_from_arrow(&DataType::UInt8), "BIGINT");
+        assert_eq!(pg_type_from_arrow(&DataType::UInt16), "BIGINT");
+        assert_eq!(pg_type_from_arrow(&DataType::UInt32), "BIGINT");
+        assert_eq!(pg_type_from_arrow(&DataType::Float16), "REAL");
+        assert_eq!(pg_type_from_arrow(&DataType::Float32), "REAL");
+        assert_eq!(pg_type_from_arrow(&DataType::Float64), "DOUBLE PRECISION");
+        assert_eq!(pg_type_from_arrow(&DataType::Boolean), "BOOLEAN");
+        assert_eq!(pg_type_from_arrow(&DataType::Utf8), "TEXT");
+        assert_eq!(pg_type_from_arrow(&DataType::LargeUtf8), "TEXT");
+        assert_eq!(pg_type_from_arrow(&DataType::Binary), "BYTEA");
+        assert_eq!(pg_type_from_arrow(&DataType::LargeBinary), "BYTEA");
+        assert_eq!(pg_type_from_arrow(&DataType::Date32), "DATE");
+        assert_eq!(pg_type_from_arrow(&DataType::Date64), "DATE");
+    }
+
+    #[test]
+    fn arrow_to_pg_type_uint64_narrows_to_bigint() {
+        // Lossy by design: Arrow UInt64 values above i64::MAX cannot round-trip
+        // through a PostgreSQL BIGINT.
+        assert_eq!(pg_type_from_arrow(&DataType::UInt64), "BIGINT");
+    }
+
+    #[test]
+    fn arrow_to_pg_type_timestamps_drop_the_time_zone() {
+        // A tz-aware Arrow timestamp still maps to a naive TIMESTAMP, and
+        // `bind_arrow_value` formats the value as UTC — so the offset is lost.
+        assert_eq!(
+            pg_type_from_arrow(&DataType::Timestamp(TimeUnit::Microsecond, None)),
+            "TIMESTAMP"
+        );
+        assert_eq!(
+            pg_type_from_arrow(&DataType::Timestamp(
+                TimeUnit::Microsecond,
+                Some("+05:30".into())
+            )),
+            "TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn arrow_to_pg_type_unmapped_types_fall_back_to_text() {
+        assert_eq!(pg_type_from_arrow(&DataType::Decimal128(10, 2)), "TEXT");
+        assert_eq!(pg_type_from_arrow(&DataType::Time64(TimeUnit::Microsecond)), "TEXT");
+        assert_eq!(
+            pg_type_from_arrow(&DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Int32,
+                true
+            )))),
+            "TEXT"
+        );
+    }
+
+    #[test]
+    fn arrow_to_pg_type_output_always_parses() {
+        // Guarantees the `map_err` arm in `get_postgresql_columns` is unreachable.
+        for dt in [
+            DataType::Int8,
+            DataType::Int64,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Boolean,
+            DataType::Utf8,
+            DataType::Binary,
+            DataType::Date32,
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Decimal128(10, 2),
+        ] {
+            assert!(pg_type_from_arrow(&dt).parse::<PostgreSqlColumnType>().is_ok());
+        }
+    }
+
+    // ── get_postgresql_columns ────────────────────────────────────────────────
+
+    #[test]
+    fn postgresql_columns_preserve_name_type_and_order() {
+        let schema = schema_of(&[
+            ("id", DataType::Utf8, false),
+            ("qty", DataType::Int64, false),
+            ("price", DataType::Float64, false),
+        ]);
+        let cols = get_postgresql_columns(&schema, &[]).unwrap();
+        let names: Vec<&str> = cols.iter().map(|c| c.column_name.as_str()).collect();
+        assert_eq!(names, vec!["id", "qty", "price"]);
+        let types: Vec<&str> = cols.iter().map(ty).collect();
+        assert_eq!(types, vec!["TEXT", "BIGINT", "DOUBLE PRECISION"]);
+    }
+
+    #[test]
+    fn postgresql_columns_nullability_ignores_arrow_field_nullability() {
+        // Nullability comes ONLY from the `optional_columns` allowlist. An Arrow field
+        // declared nullable but absent from that list still becomes NOT NULL, so a null
+        // in the data will be rejected at insert time.
+        let schema = schema_of(&[
+            ("a", DataType::Int64, true),  // Arrow says nullable
+            ("b", DataType::Int64, false), // Arrow says required
+        ]);
+        let cols = get_postgresql_columns(&schema, &["b".to_string()]).unwrap();
+        assert!(!cols[0].nullable, "arrow-nullable 'a' should still be NOT NULL");
+        assert!(cols[1].nullable, "'b' is nullable only because it is listed");
+    }
+
+    #[test]
+    fn postgresql_columns_optional_list_may_name_missing_columns() {
+        let schema = schema_of(&[("a", DataType::Int64, false)]);
+        let cols = get_postgresql_columns(&schema, &["nonexistent".to_string()]).unwrap();
+        assert_eq!(cols.len(), 1);
+        assert!(!cols[0].nullable);
+    }
+
+    #[test]
+    fn postgresql_columns_empty_schema_yields_no_columns() {
+        assert!(get_postgresql_columns(&Schema::empty(), &[]).unwrap().is_empty());
+    }
+
+    // ── get_t_postgresql_columns ──────────────────────────────────────────────
+
+    #[test]
+    fn t_columns_synthesise_c0_and_rename_the_rest() {
+        // Four distinct types so the shift-by-one alignment is actually proven:
+        // out[i] takes base[i]'s TYPE but column_names[i - 1]'s NAME.
+        let schema = schema_of(&[
+            ("ignored", DataType::Int64, false),
+            ("f1", DataType::Int32, false),
+            ("f2", DataType::Float64, false),
+            ("f3", DataType::Utf8, false),
+        ]);
+        let names = vec!["qty".to_string(), "price".to_string(), "label".to_string()];
+        let cols = get_t_postgresql_columns(&schema, names, &[]).unwrap();
+
+        let got: Vec<(&str, &str)> = cols.iter().map(|c| (c.column_name.as_str(), ty(c))).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("c0", "TEXT"),
+                ("qty", "INTEGER"),
+                ("price", "DOUBLE PRECISION"),
+                ("label", "TEXT"),
+            ]
+        );
+    }
+
+    #[test]
+    fn t_columns_force_c0_to_text_not_null_regardless_of_parquet_type() {
+        let schema = schema_of(&[
+            ("ignored", DataType::Int64, false),
+            ("f1", DataType::Int32, false),
+        ]);
+        let cols =
+            get_t_postgresql_columns(&schema, vec!["qty".to_string()], &["c0".to_string()]).unwrap();
+        assert_eq!(cols[0].column_name, "c0");
+        assert_eq!(ty(&cols[0]), "TEXT");
+        assert!(
+            !cols[0].nullable,
+            "c0 holds the generated UUID and is never nullable"
+        );
+    }
+
+    #[test]
+    fn t_columns_match_optional_against_the_new_name_not_the_parquet_name() {
+        let schema = schema_of(&[
+            ("ignored", DataType::Int64, false),
+            ("f1", DataType::Int32, false),
+        ]);
+
+        let by_new = get_t_postgresql_columns(
+            &schema,
+            vec!["amount".to_string()],
+            &["amount".to_string()],
+        )
+        .unwrap();
+        assert!(by_new[1].nullable);
+
+        let by_parquet =
+            get_t_postgresql_columns(&schema, vec!["amount".to_string()], &["f1".to_string()])
+                .unwrap();
+        assert!(
+            !by_parquet[1].nullable,
+            "the parquet-side name must NOT satisfy the optional list"
+        );
+    }
+
+    #[test]
+    fn t_columns_reject_too_few_names() {
+        let schema = schema_of(&[
+            ("a", DataType::Int64, false),
+            ("b", DataType::Int64, false),
+            ("c", DataType::Int64, false),
+            ("d", DataType::Int64, false),
+        ]);
+        let err = get_t_postgresql_columns(&schema, vec!["x".into(), "y".into()], &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Expected 3 columns, got 4 (t_mode expects parquet to have 1 extra leading column)"
+        );
+    }
+
+    #[test]
+    fn t_columns_reject_too_many_names() {
+        let schema = schema_of(&[
+            ("a", DataType::Int64, false),
+            ("b", DataType::Int64, false),
+        ]);
+        let err =
+            get_t_postgresql_columns(&schema, vec!["x".into(), "y".into(), "z".into()], &[])
+                .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Expected 4 columns, got 2 (t_mode expects parquet to have 1 extra leading column)"
+        );
+    }
+
+    #[test]
+    fn t_columns_reject_empty_schema() {
+        // 0 names implies 1 expected column, but an empty schema has none.
+        assert!(get_t_postgresql_columns(&Schema::empty(), vec![], &[]).is_err());
+    }
+
+    // ── build_create_table_sql ────────────────────────────────────────────────
+    //
+    // This DDL is handed to sqlx via `AssertSqlSafe`, so the exact text matters.
+
+    #[test]
+    fn create_table_sql_basic_shape() {
+        let cols = vec![
+            col("c0", PostgreSqlColumnType::Text, false),
+            col("c1", PostgreSqlColumnType::Integer, false),
+        ];
+        assert_eq!(
+            build_create_table_sql("t", &cols, &[]).unwrap(),
+            "CREATE TABLE IF NOT EXISTS \"public\".\"t\" (\n  \"c0\" TEXT NOT NULL,\n  \"c1\" INTEGER NOT NULL\n);"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_nullable_column_omits_not_null() {
+        let cols = vec![col("c1", PostgreSqlColumnType::Integer, true)];
+        assert_eq!(
+            build_create_table_sql("t", &cols, &[]).unwrap(),
+            "CREATE TABLE IF NOT EXISTS \"public\".\"t\" (\n  \"c1\" INTEGER\n);"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_places_unique_after_not_null() {
+        let cols = vec![col("c1", PostgreSqlColumnType::Integer, false)];
+        assert_eq!(
+            build_create_table_sql("t", &cols, &["c1".to_string()]).unwrap(),
+            "CREATE TABLE IF NOT EXISTS \"public\".\"t\" (\n  \"c1\" INTEGER NOT NULL UNIQUE\n);"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_nullable_and_unique() {
+        let cols = vec![col("c1", PostgreSqlColumnType::Integer, true)];
+        assert_eq!(
+            build_create_table_sql("t", &cols, &["c1".to_string()]).unwrap(),
+            "CREATE TABLE IF NOT EXISTS \"public\".\"t\" (\n  \"c1\" INTEGER UNIQUE\n);"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_honours_an_explicit_schema() {
+        let cols = vec![col("c1", PostgreSqlColumnType::Text, false)];
+        let sql = build_create_table_sql("myschema.t", &cols, &[]).unwrap();
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"myschema\".\"t\" ("), "{sql}");
+    }
+
+    #[test]
+    fn create_table_sql_splits_on_the_first_dot_only() {
+        // Documents current behaviour: `a.b.c` becomes schema "a" and a single
+        // table identifier "b.c", not a three-part name.
+        let cols = vec![col("c1", PostgreSqlColumnType::Text, false)];
+        let sql = build_create_table_sql("a.b.c", &cols, &[]).unwrap();
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"a\".\"b.c\" ("), "{sql}");
+    }
+
+    #[test]
+    fn create_table_sql_ignores_unique_names_that_match_no_column() {
+        let cols = vec![col("c1", PostgreSqlColumnType::Text, false)];
+        let sql = build_create_table_sql("t", &cols, &["nonexistent".to_string()]).unwrap();
+        assert!(!sql.contains("UNIQUE"), "{sql}");
+    }
+
+    #[test]
+    fn create_table_sql_rejects_an_empty_column_list() {
+        let err = build_create_table_sql("t", &[], &[]).unwrap_err();
+        assert_eq!(err.to_string(), "Parquet file has no columns");
+    }
+
+    // ── qident / qualify_public_default ───────────────────────────────────────
+
+    #[test]
+    fn loader_qident_matches_the_table_module_copy() {
+        // Byte-identical duplicate of `postgresql_table::qident`; a test module here
+        // cannot reach that private copy, so the expectations are restated.
+        assert_eq!(qident("abc"), "\"abc\"");
+        assert_eq!(qident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(qident("a.b"), "\"a.b\"");
+        assert_eq!(qident(""), "\"\"");
+    }
+
+    #[test]
+    fn qualify_public_default_adds_the_public_schema() {
+        assert_eq!(qualify_public_default("t"), "public.t");
+    }
+
+    #[test]
+    fn qualify_public_default_leaves_qualified_names_alone() {
+        assert_eq!(qualify_public_default("s.t"), "s.t");
+        assert_eq!(qualify_public_default("a.b.c"), "a.b.c");
+    }
+
+    #[test]
+    fn qualify_public_default_on_empty_input() {
+        assert_eq!(qualify_public_default(""), "public.");
+    }
+
+    // ── parquet_part_path / collect_existing_parts ────────────────────────────
+
+    #[test]
+    fn parquet_part_path_inserts_the_shard_suffix() {
+        assert_eq!(parquet_part_path("data.parquet", 0), "data_xyz0.parquet");
+        assert_eq!(parquet_part_path("/x/data.parquet", 12), "/x/data_xyz12.parquet");
+    }
+
+    #[test]
+    fn parquet_part_path_replaces_every_occurrence() {
+        // Documents current behaviour: `.replace` is global, so a directory component
+        // ending in `.parquet` is rewritten too.
+        assert_eq!(
+            parquet_part_path("/a.parquet/b.parquet", 0),
+            "/a_xyz0.parquet/b_xyz0.parquet"
+        );
+    }
+
+    #[test]
+    fn parquet_part_path_without_the_suffix_returns_the_input_unchanged() {
+        // Every shard index maps to the SAME string, which is what allows
+        // `collect_existing_parts` to loop forever if that path exists.
+        assert_eq!(parquet_part_path("data", 0), "data");
+        assert_eq!(parquet_part_path("data", 7), "data");
+    }
+
+    #[test]
+    fn collect_existing_parts_returns_nothing_when_no_shard_exists() {
+        let missing = "/nonexistent-codcel-test-dir/data.parquet";
+        assert!(collect_existing_parts(missing).is_empty());
+    }
+
+    // ── bind_arrow_value ──────────────────────────────────────────────────────
+    //
+    // `QueryBuilder<Postgres>` holds no connection — it is `{ query, init_len, arguments }` —
+    // so binding is entirely offline. Bound value BYTES are not readable, but the emitted
+    // placeholder text is, which is the property the sqlx 0.9 upgrade actually put at risk.
+
+    #[test]
+    fn bind_advances_the_placeholder_counter_across_calls() {
+        // The single most upgrade-relevant assertion here: sqlx 0.9 dropped the lifetime
+        // from QueryBuilder<'a, DB> and made arguments owned. The bulk-insert loops depend
+        // on the counter advancing correctly across successive binds on ONE builder.
+        let a = Int64Array::from(vec![1i64, 2, 3]);
+        let mut qb = QueryBuilder::<Postgres>::new("");
+        for i in 0..3 {
+            bind_arrow_value(&mut qb, &a, i).unwrap();
+        }
+        assert_eq!(qb.into_string(), "$1$2$3");
+    }
+
+    #[test]
+    fn bind_null_emits_one_placeholder() {
+        let a = Int64Array::from(vec![None::<i64>]);
+        assert_eq!(bind_one(&a, 0).unwrap(), "$1");
+    }
+
+    #[test]
+    fn bind_supported_scalar_types() {
+        assert_eq!(bind_one(&Int64Array::from(vec![7i64]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&Int32Array::from(vec![7i32]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&Float64Array::from(vec![1.5f64]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&Float32Array::from(vec![1.5f32]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&BooleanArray::from(vec![true]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&StringArray::from(vec!["x"]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&LargeStringArray::from(vec!["x"]), 0).unwrap(), "$1");
+    }
+
+    #[test]
+    fn bind_date_and_timestamp_types() {
+        assert_eq!(bind_one(&Date32Array::from(vec![0i32]), 0).unwrap(), "$1");
+        assert_eq!(bind_one(&Date64Array::from(vec![0i64]), 0).unwrap(), "$1");
+        assert_eq!(
+            bind_one(&TimestampSecondArray::from(vec![0i64]), 0).unwrap(),
+            "$1"
+        );
+        assert_eq!(
+            bind_one(&TimestampMillisecondArray::from(vec![0i64]), 0).unwrap(),
+            "$1"
+        );
+        assert_eq!(
+            bind_one(&TimestampMicrosecondArray::from(vec![0i64]), 0).unwrap(),
+            "$1"
+        );
+        assert_eq!(
+            bind_one(&TimestampNanosecondArray::from(vec![0i64]), 0).unwrap(),
+            "$1"
+        );
+    }
+
+    #[test]
+    fn bind_unmapped_type_uses_the_string_fallback() {
+        let a = Time64MicrosecondArray::from(vec![1_000i64]);
+        assert_eq!(bind_one(&a, 0).unwrap(), "$1");
+    }
+
+    #[test]
+    fn bind_date64_out_of_range_errors() {
+        let a = Date64Array::from(vec![i64::MAX]);
+        let err = bind_one(&a, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid timestamp millis"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bind_timestamp_second_out_of_range_errors() {
+        let a = TimestampSecondArray::from(vec![i64::MAX]);
+        let err = bind_one(&a, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid timestamp seconds"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bind_timestamp_millisecond_out_of_range_errors() {
+        let a = TimestampMillisecondArray::from(vec![i64::MAX]);
+        let err = bind_one(&a, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid timestamp millis"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bind_timestamp_nanosecond_before_epoch_errors() {
+        // The sub-second remainder of a negative value is cast to u32 and wraps, which
+        // chrono then rejects. A pre-1970 nanosecond timestamp therefore fails to load
+        // with a misleading "Invalid timestamp nanos" message rather than converting.
+        let a = TimestampNanosecondArray::from(vec![-1_500_000_000i64]);
+        let err = bind_one(&a, 0).unwrap_err();
+        assert!(err.to_string().contains("Invalid timestamp nanos"), "{err}");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn bind_timestamp_microsecond_before_epoch_panics_in_debug() {
+        // Same sign bug as the nanosecond branch, but here the wrapped remainder is
+        // multiplied by 1_000, which overflows u32: a panic in debug builds, and a
+        // silent wrap to a wrong timestamp in release builds.
+        let a = TimestampMicrosecondArray::from(vec![-1_500_000i64]);
+        let _ = bind_one(&a, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bind_date32_overflow_panics() {
+        // `NaiveDate + Duration` is a panicking add. Every sibling branch returns Err
+        // on out-of-range input; this one aborts the whole bulk insert instead.
+        let a = Date32Array::from(vec![i32::MAX]);
+        let _ = bind_one(&a, 0);
+    }
 }

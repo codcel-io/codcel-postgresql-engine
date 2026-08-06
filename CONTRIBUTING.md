@@ -182,7 +182,12 @@ cargo fmt
 cargo clippy --all-targets --all-features
 ```
 
-Note: tests require a running PostgreSQL instance. See the environment configuration section of the README for connection details.
+Note: the unit tests are hermetic — they need no PostgreSQL instance, no network, and no
+`CODCEL_*` environment variables. They cover the SQL-building, schema-mapping and
+value-binding helpers. The code paths that talk to a database (the `CodcelTable` methods,
+`PostgreSQLTable::init`, and the Parquet loaders) are not covered by automated tests and
+must be exercised manually against a real instance; see the environment configuration
+section of the README for connection details.
 
 ---
 
