@@ -8,31 +8,31 @@ use crate::postgresql_table_loader::{
     ensure_t_table_from_parquet, ensure_table_from_parquet, PostgreSqlColumnType, PostgresSqlColumn,
 };
 use async_trait::async_trait;
+use codcel_calculation_engine::input::Input;
+use codcel_calculation_engine::value::Value;
+use codcel_calculation_engine::value_format::ValueFormat;
 use codcel_table_engine::codcel_table::CodcelTable;
 use codcel_table_engine::column_type::ColumnType;
 use codcel_table_engine::condition::Condition;
-use codcel_table_engine::sql_modifiers::{SqlAggregate, SqlModifiers};
 use codcel_table_engine::searchable::{
     find_exact_position, find_largest_position, find_smallest_position, Searchable,
 };
+use codcel_table_engine::sql_modifiers::{SqlAggregate, SqlModifiers};
 use codcel_table_engine::table_constants::{
     X_MATCH_MODE_EXACT, X_MATCH_MODE_EXACT_NEXT_LARGEST, X_MATCH_MODE_EXACT_NEXT_SMALLEST,
     X_MATCH_MODE_WILDCARD, X_SEARCH_MODE_BINARY_FIRST, X_SEARCH_MODE_BINARY_LAST,
     X_SEARCH_MODE_FIRST, X_SEARCH_MODE_REVERSE,
 };
 use codcel_table_engine::table_functions::TableFunctions;
-use codcel_calculation_engine::input::Input;
-use codcel_calculation_engine::value::Value;
-use codcel_calculation_engine::value_format::ValueFormat;
+use futures::stream::{self, StreamExt};
+use log::debug;
 use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
 use sqlx::{Arguments, AssertSqlSafe, Executor, Row};
 use std::collections::HashMap;
 use std::error::Error;
-use std::time::Duration;
 use std::sync::Arc;
-use log::debug;
+use std::time::Duration;
 use uuid::Uuid;
-use futures::stream::{self, StreamExt};
 
 /// Quote a PostgreSQL identifier (column/table name) to prevent SQL injection.
 fn qident(ident: &str) -> String {
@@ -58,18 +58,28 @@ fn quote_columns(columns: &str) -> String {
 /// - `select_prefix`: "DISTINCT " or "" (aggregates handled separately)
 /// - `order_clause`: " ORDER BY ..." or ""
 /// - `limit_clause`: " LIMIT ... OFFSET ..." or ""
-fn build_modifier_clauses(modifiers: &SqlModifiers, col_list: &[String]) -> (String, String, String) {
-    let select_prefix = if modifiers.distinct { "DISTINCT ".to_string() } else { String::new() };
+fn build_modifier_clauses(
+    modifiers: &SqlModifiers,
+    col_list: &[String],
+) -> (String, String, String) {
+    let select_prefix = if modifiers.distinct {
+        "DISTINCT ".to_string()
+    } else {
+        String::new()
+    };
 
     let order_clause = if let Some(ref order) = modifiers.order_by {
-        let parts: Vec<String> = order.iter().map(|(idx, desc)| {
-            let col = if *idx > 0 && *idx <= col_list.len() {
-                qident(&col_list[*idx - 1])
-            } else {
-                qident(&col_list[0])
-            };
-            format!("{} {}", col, if *desc { "DESC" } else { "ASC" })
-        }).collect();
+        let parts: Vec<String> = order
+            .iter()
+            .map(|(idx, desc)| {
+                let col = if *idx > 0 && *idx <= col_list.len() {
+                    qident(&col_list[*idx - 1])
+                } else {
+                    qident(&col_list[0])
+                };
+                format!("{} {}", col, if *desc { "DESC" } else { "ASC" })
+            })
+            .collect();
         format!(" ORDER BY {}", parts.join(", "))
     } else {
         String::new()
@@ -181,7 +191,8 @@ impl PostgreSQLTable {
                     let mut parts = func_name.splitn(2, ':');
                     let template_name = parts.next().unwrap();
                     let constants_str = parts.next().unwrap_or("");
-                    let params: Vec<Value> = constants_str.split(':')
+                    let params: Vec<Value> = constants_str
+                        .split(':')
                         .filter(|s| !s.is_empty())
                         .map(|s| {
                             // Try i32 first to preserve integer types (e.g., "1" → I32(1))
@@ -453,7 +464,10 @@ impl PostgreSQLTable {
     pub fn get_abstract_column_types(&self) -> HashMap<String, ColumnType> {
         let mut column_types: HashMap<String, ColumnType> = HashMap::new();
         for col in &self.postgresql_columns {
-            column_types.insert(col.column_name.clone(), pg_type_to_column_type(&col.sql_type));
+            column_types.insert(
+                col.column_name.clone(),
+                pg_type_to_column_type(&col.sql_type),
+            );
         }
         column_types
     }
@@ -1051,7 +1065,10 @@ impl CodcelTable for PostgreSQLTable {
 
         let data_cols_len = data_cols.len();
         // Quote all column names for SQL safety (use cached where available)
-        let all_cols_quoted: Vec<String> = data_cols.iter().map(|c| self.get_quoted_column_name(c)).collect();
+        let all_cols_quoted: Vec<String> = data_cols
+            .iter()
+            .map(|c| self.get_quoted_column_name(c))
+            .collect();
         let all_cols_str = all_cols_quoted.join(", ");
         let quoted_table = self.get_quoted_table_name();
 
@@ -1680,13 +1697,21 @@ impl CodcelTable for PostgreSQLTable {
                     X_SEARCH_MODE_BINARY_FIRST => {
                         format!(
                             "SELECT {} FROM {} WHERE {} = {} ORDER BY {} ASC LIMIT 1",
-                            quoted_columns, quoted_table, search_col_expr, lookup_expr, search_col_expr
+                            quoted_columns,
+                            quoted_table,
+                            search_col_expr,
+                            lookup_expr,
+                            search_col_expr
                         )
                     }
                     X_SEARCH_MODE_BINARY_LAST => {
                         format!(
                             "SELECT {} FROM {} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
-                            quoted_columns, quoted_table, search_col_expr, lookup_expr, search_col_expr
+                            quoted_columns,
+                            quoted_table,
+                            search_col_expr,
+                            lookup_expr,
+                            search_col_expr
                         )
                     }
                     _ => String::new(),
@@ -1707,13 +1732,21 @@ impl CodcelTable for PostgreSQLTable {
                     X_SEARCH_MODE_BINARY_FIRST => {
                         format!(
                             "SELECT {} FROM {} WHERE {} >= {} ORDER BY {} ASC LIMIT 1",
-                            quoted_columns, quoted_table, search_col_expr, lookup_expr, search_col_expr
+                            quoted_columns,
+                            quoted_table,
+                            search_col_expr,
+                            lookup_expr,
+                            search_col_expr
                         )
                     }
                     X_SEARCH_MODE_BINARY_LAST => {
                         format!(
                             "SELECT {} FROM {} WHERE {} >= {} ORDER BY {} DESC LIMIT 1",
-                            quoted_columns, quoted_table, search_col_expr, lookup_expr, search_col_expr
+                            quoted_columns,
+                            quoted_table,
+                            search_col_expr,
+                            lookup_expr,
+                            search_col_expr
                         )
                     }
                     _ => String::new(),
@@ -1728,7 +1761,11 @@ impl CodcelTable for PostgreSQLTable {
                     X_SEARCH_MODE_BINARY_LAST => {
                         format!(
                             "SELECT {} FROM {} WHERE {} <= {} ORDER BY {} DESC LIMIT 1",
-                            quoted_columns, quoted_table, search_col_expr, lookup_expr, search_col_expr
+                            quoted_columns,
+                            quoted_table,
+                            search_col_expr,
+                            lookup_expr,
+                            search_col_expr
                         )
                     }
                     _ => String::new(),
@@ -1744,7 +1781,9 @@ impl CodcelTable for PostgreSQLTable {
                     .filter(|s| !s.is_empty())
                     .collect();
 
-                let row_opt = sqlx::query(AssertSqlSafe(sql_query)).fetch_optional(&self.db).await?;
+                let row_opt = sqlx::query(AssertSqlSafe(sql_query))
+                    .fetch_optional(&self.db)
+                    .await?;
                 if let Some(row) = row_opt {
                     return if selected_cols.len() == 1 {
                         let mut v =
@@ -1998,7 +2037,9 @@ impl CodcelTable for PostgreSQLTable {
                     // First collect all values (with error handling)
                     let values: Result<Vec<Value>, _> = rows
                         .into_iter()
-                        .map(|pg_row| self.get_value_at_column_name_pos(&Some(pg_row), &target_col, 0))
+                        .map(|pg_row| {
+                            self.get_value_at_column_name_pos(&Some(pg_row), &target_col, 0)
+                        })
                         .collect();
                     let values = values?;
                     // Then apply table functions concurrently
@@ -2479,12 +2520,13 @@ impl CodcelTable for PostgreSQLTable {
         let quoted_table = self.get_quoted_table_name();
 
         let where_condition = condition.condition(&column_types, value_format)?;
-        let sql_query = format!(
-            "SELECT {quoted_columns} FROM {quoted_table} WHERE {where_condition}"
-        );
+        let sql_query =
+            format!("SELECT {quoted_columns} FROM {quoted_table} WHERE {where_condition}");
 
         // Execute query and collect all rows
-        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+            .fetch_all(&self.db)
+            .await?;
 
         // Prepare list of selected columns to know how to map result types by name
         let selected_cols: Vec<String> = columns
@@ -2615,7 +2657,9 @@ impl CodcelTable for PostgreSQLTable {
         let sql_query = format!("SELECT {columns} FROM {quoted_table}");
 
         // Execute query and collect all rows
-        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+            .fetch_all(&self.db)
+            .await?;
 
         // Prepare list of selected columns to know how to map result types by name
         let selected_cols: Vec<String> = columns
@@ -2723,7 +2767,16 @@ impl CodcelTable for PostgreSQLTable {
         modifiers: &SqlModifiers,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.filter(condition, if_empty, columns, table_functions, input, value_format).await;
+            return self
+                .filter(
+                    condition,
+                    if_empty,
+                    columns,
+                    table_functions,
+                    input,
+                    value_format,
+                )
+                .await;
         }
 
         let column_types = self.get_abstract_column_types();
@@ -2736,7 +2789,8 @@ impl CodcelTable for PostgreSQLTable {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let (select_prefix, order_clause, limit_clause) = build_modifier_clauses(modifiers, &selected_cols);
+        let (select_prefix, order_clause, limit_clause) =
+            build_modifier_clauses(modifiers, &selected_cols);
 
         // Aggregate query: returns a single scalar value
         if let Some(ref agg) = modifiers.aggregate {
@@ -2744,7 +2798,8 @@ impl CodcelTable for PostgreSQLTable {
                 "COUNT(*)".to_string()
             } else {
                 // Filter to numeric columns only, matching Excel behavior of ignoring text
-                let numeric_cols: Vec<String> = selected_cols.iter()
+                let numeric_cols: Vec<String> = selected_cols
+                    .iter()
                     .filter(|col| column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .map(|col| qident(col))
                     .collect();
@@ -2758,7 +2813,9 @@ impl CodcelTable for PostgreSQLTable {
                 "SELECT {} FROM {} WHERE {}",
                 select_expr, quoted_table, where_condition
             );
-            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query)).fetch_one(&self.db).await?;
+            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query))
+                .fetch_one(&self.db)
+                .await?;
             let result: Option<f64> = row.try_get(0)?;
             return Ok(Value::F64(result.unwrap_or(0.0)));
         }
@@ -2769,7 +2826,9 @@ impl CodcelTable for PostgreSQLTable {
             "SELECT {select_prefix}{quoted_columns} FROM {quoted_table} WHERE {where_condition}{order_clause}{limit_clause}"
         );
 
-        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+            .fetch_all(&self.db)
+            .await?;
 
         let mut area: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         for row in rows.into_iter() {
@@ -2779,41 +2838,67 @@ impl CodcelTable for PostgreSQLTable {
                     match col.sql_type {
                         PostgreSqlColumnType::Integer | PostgreSqlColumnType::BigInt => {
                             let v: Option<i32> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::I32(x), None => Value::OptionI32(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::I32(x),
+                                None => Value::OptionI32(None),
+                            });
                         }
                         PostgreSqlColumnType::Real | PostgreSqlColumnType::DoublePrecision => {
                             let v: Option<f64> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::F64(x), None => Value::OptionF64(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::F64(x),
+                                None => Value::OptionF64(None),
+                            });
                         }
                         PostgreSqlColumnType::Boolean => {
                             let v: Option<bool> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::Bool(x), None => Value::OptionBool(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::Bool(x),
+                                None => Value::OptionBool(None),
+                            });
                         }
                         PostgreSqlColumnType::Text => {
                             let v: Option<String> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::String(x), None => Value::OptionString(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::String(x),
+                                None => Value::OptionString(None),
+                            });
                         }
                         PostgreSqlColumnType::Bytea => {
                             let v: Option<Vec<u8>> = row.try_get(idx)?;
                             row_vals.push(match v {
-                                Some(bytes) => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                                Some(bytes) => {
+                                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                                }
                                 None => Value::OptionString(None),
                             });
                         }
                         PostgreSqlColumnType::Date | PostgreSqlColumnType::Timestamp => {
                             let v: Option<f64> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::F64(x), None => Value::OptionF64(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::F64(x),
+                                None => Value::OptionF64(None),
+                            });
                         }
                     }
                 } else {
                     let v: Option<String> = row.try_get(idx)?;
-                    row_vals.push(match v { Some(x) => Value::String(x), None => Value::OptionString(None) });
+                    row_vals.push(match v {
+                        Some(x) => Value::String(x),
+                        None => Value::OptionString(None),
+                    });
                 }
             }
 
             let processed_row: Vec<Value> = stream::iter(row_vals)
                 .map(|v| async {
-                    PostgreSQLTable::apply_table_functions_to_value(v, table_functions, input, value_format).await
+                    PostgreSQLTable::apply_table_functions_to_value(
+                        v,
+                        table_functions,
+                        input,
+                        value_format,
+                    )
+                    .await
                 })
                 .buffer_unordered(10)
                 .collect()
@@ -2840,7 +2925,9 @@ impl CodcelTable for PostgreSQLTable {
         modifiers: &SqlModifiers,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.select_all(columns, table_functions, input, value_format).await;
+            return self
+                .select_all(columns, table_functions, input, value_format)
+                .await;
         }
 
         let quoted_table = self.get_quoted_table_name();
@@ -2851,7 +2938,8 @@ impl CodcelTable for PostgreSQLTable {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let (select_prefix, order_clause, limit_clause) = build_modifier_clauses(modifiers, &selected_cols);
+        let (select_prefix, order_clause, limit_clause) =
+            build_modifier_clauses(modifiers, &selected_cols);
 
         // Aggregate query
         if let Some(ref agg) = modifiers.aggregate {
@@ -2859,7 +2947,8 @@ impl CodcelTable for PostgreSQLTable {
                 "COUNT(*)".to_string()
             } else {
                 let column_types = self.get_abstract_column_types();
-                let numeric_cols: Vec<String> = selected_cols.iter()
+                let numeric_cols: Vec<String> = selected_cols
+                    .iter()
                     .filter(|col| column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .map(|col| qident(col))
                     .collect();
@@ -2869,11 +2958,10 @@ impl CodcelTable for PostgreSQLTable {
                     agg.build_aggregate_select(&numeric_cols)
                 }
             };
-            let sql_query = format!(
-                "SELECT {} FROM {}",
-                select_expr, quoted_table
-            );
-            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query)).fetch_one(&self.db).await?;
+            let sql_query = format!("SELECT {} FROM {}", select_expr, quoted_table);
+            let row: PgRow = sqlx::query(AssertSqlSafe(sql_query))
+                .fetch_one(&self.db)
+                .await?;
             let result: Option<f64> = row.try_get(0)?;
             return Ok(Value::F64(result.unwrap_or(0.0)));
         }
@@ -2883,7 +2971,9 @@ impl CodcelTable for PostgreSQLTable {
             "SELECT {select_prefix}{quoted_columns} FROM {quoted_table}{order_clause}{limit_clause}"
         );
 
-        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query)).fetch_all(&self.db).await?;
+        let rows: Vec<PgRow> = sqlx::query(AssertSqlSafe(sql_query))
+            .fetch_all(&self.db)
+            .await?;
 
         let mut area: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         for row in rows.into_iter() {
@@ -2893,41 +2983,67 @@ impl CodcelTable for PostgreSQLTable {
                     match col.sql_type {
                         PostgreSqlColumnType::Integer | PostgreSqlColumnType::BigInt => {
                             let v: Option<i32> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::I32(x), None => Value::OptionI32(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::I32(x),
+                                None => Value::OptionI32(None),
+                            });
                         }
                         PostgreSqlColumnType::Real | PostgreSqlColumnType::DoublePrecision => {
                             let v: Option<f64> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::F64(x), None => Value::OptionF64(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::F64(x),
+                                None => Value::OptionF64(None),
+                            });
                         }
                         PostgreSqlColumnType::Boolean => {
                             let v: Option<bool> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::Bool(x), None => Value::OptionBool(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::Bool(x),
+                                None => Value::OptionBool(None),
+                            });
                         }
                         PostgreSqlColumnType::Text => {
                             let v: Option<String> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::String(x), None => Value::OptionString(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::String(x),
+                                None => Value::OptionString(None),
+                            });
                         }
                         PostgreSqlColumnType::Bytea => {
                             let v: Option<Vec<u8>> = row.try_get(idx)?;
                             row_vals.push(match v {
-                                Some(bytes) => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                                Some(bytes) => {
+                                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                                }
                                 None => Value::OptionString(None),
                             });
                         }
                         PostgreSqlColumnType::Date | PostgreSqlColumnType::Timestamp => {
                             let v: Option<f64> = row.try_get(idx)?;
-                            row_vals.push(match v { Some(x) => Value::F64(x), None => Value::OptionF64(None) });
+                            row_vals.push(match v {
+                                Some(x) => Value::F64(x),
+                                None => Value::OptionF64(None),
+                            });
                         }
                     }
                 } else {
                     let v: Option<String> = row.try_get(idx)?;
-                    row_vals.push(match v { Some(x) => Value::String(x), None => Value::OptionString(None) });
+                    row_vals.push(match v {
+                        Some(x) => Value::String(x),
+                        None => Value::OptionString(None),
+                    });
                 }
             }
 
             let processed_row: Vec<Value> = stream::iter(row_vals)
                 .map(|v| async {
-                    PostgreSQLTable::apply_table_functions_to_value(v, table_functions, input, value_format).await
+                    PostgreSQLTable::apply_table_functions_to_value(
+                        v,
+                        table_functions,
+                        input,
+                        value_format,
+                    )
+                    .await
                 })
                 .buffer_unordered(10)
                 .collect()
@@ -2959,14 +3075,39 @@ impl CodcelTable for PostgreSQLTable {
         modifiers: &SqlModifiers,
     ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.x_lookup(lookup_value, search_column, columns, row, if_not_found, match_mode, search_mode, table_functions, input, value_format).await;
+            return self
+                .x_lookup(
+                    lookup_value,
+                    search_column,
+                    columns,
+                    row,
+                    if_not_found,
+                    match_mode,
+                    search_mode,
+                    table_functions,
+                    input,
+                    value_format,
+                )
+                .await;
         }
 
         // For x_lookup with modifiers, first get the base result then apply modifiers via SQL
         // x_lookup already returns filtered results; modifiers add ORDER BY / DISTINCT / aggregates
         // For now, delegate to the base implementation for the lookup, then apply modifiers
         // A full implementation would integrate modifiers into the x_lookup SQL query itself
-        self.x_lookup(lookup_value, search_column, columns, row, if_not_found, match_mode, search_mode, table_functions, input, value_format).await
+        self.x_lookup(
+            lookup_value,
+            search_column,
+            columns,
+            row,
+            if_not_found,
+            match_mode,
+            search_mode,
+            table_functions,
+            input,
+            value_format,
+        )
+        .await
     }
 
     /// Adds a new row to the table with an auto-generated UUID as the ID.
@@ -3012,9 +3153,12 @@ impl CodcelTable for PostgreSQLTable {
         let sql_arguments = self.get_add_row_arguments(&values, value_format, &id)?;
 
         // Use pre-built query template for better prepared statement caching
-        sqlx::query_with(AssertSqlSafe(Arc::clone(&self.query_templates.insert_row)), sql_arguments)
-            .execute(&self.db)
-            .await?;
+        sqlx::query_with(
+            AssertSqlSafe(Arc::clone(&self.query_templates.insert_row)),
+            sql_arguments,
+        )
+        .execute(&self.db)
+        .await?;
 
         Ok(Value::String(id))
     }
@@ -3170,9 +3314,12 @@ impl CodcelTable for PostgreSQLTable {
         let mut args = PgArguments::default();
         args.reserve(1, 0);
         let _ = args.add(id);
-        let row = sqlx::query_with(AssertSqlSafe(Arc::clone(&self.query_templates.read_row)), args)
-            .fetch_optional(&self.db)
-            .await?;
+        let row = sqlx::query_with(
+            AssertSqlSafe(Arc::clone(&self.query_templates.read_row)),
+            args,
+        )
+        .fetch_optional(&self.db)
+        .await?;
 
         match row {
             Some(row) => {
@@ -3531,7 +3678,10 @@ mod tests {
         assert_eq!(pg_type_to_column_type(&P::Integer), ColumnType::Integer);
         assert_eq!(pg_type_to_column_type(&P::BigInt), ColumnType::BigInt);
         assert_eq!(pg_type_to_column_type(&P::Real), ColumnType::Float);
-        assert_eq!(pg_type_to_column_type(&P::DoublePrecision), ColumnType::Double);
+        assert_eq!(
+            pg_type_to_column_type(&P::DoublePrecision),
+            ColumnType::Double
+        );
         assert_eq!(pg_type_to_column_type(&P::Boolean), ColumnType::Boolean);
         assert_eq!(pg_type_to_column_type(&P::Date), ColumnType::Date);
         assert_eq!(pg_type_to_column_type(&P::Timestamp), ColumnType::Timestamp);
@@ -3598,8 +3748,14 @@ mod tests {
             col("c1", PostgreSqlColumnType::Integer),
         ];
         let t = templates_for(&cols);
-        assert_eq!(&*t.insert_row, "INSERT INTO \"t\" (\"c0\", \"c1\") VALUES ($1, $2)");
-        assert_eq!(&*t.update_row, "UPDATE \"t\" SET \"c1\" = $1 WHERE \"c0\" = $2");
+        assert_eq!(
+            &*t.insert_row,
+            "INSERT INTO \"t\" (\"c0\", \"c1\") VALUES ($1, $2)"
+        );
+        assert_eq!(
+            &*t.update_row,
+            "UPDATE \"t\" SET \"c1\" = $1 WHERE \"c0\" = $2"
+        );
     }
 
     #[test]
@@ -3798,7 +3954,10 @@ mod tests {
 
     #[test]
     fn param_functions_parse_floats() {
-        assert_eq!(apply("*P*tpl:1.5", &param_fns("tpl", tf_params)), "[F64(1.5)]");
+        assert_eq!(
+            apply("*P*tpl:1.5", &param_fns("tpl", tf_params)),
+            "[F64(1.5)]"
+        );
     }
 
     #[test]

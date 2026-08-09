@@ -174,7 +174,7 @@ pub async fn ensure_t_table_from_parquet(
         Some(column_names),
         /*t_mode=*/ true,
         unique_columns,
-        optional_columns
+        optional_columns,
     )
     .await
 }
@@ -285,7 +285,10 @@ async fn ensure_table_from_parquet_core(
                     .await
                     .with_context(|| format!("reading parquet for insert: {part}"))?;
                 if t_mode {
-                    let col_names = pg_cols.iter().map(|c| c.column_name.clone()).collect::<Vec<_>>();
+                    let col_names = pg_cols
+                        .iter()
+                        .map(|c| c.column_name.clone())
+                        .collect::<Vec<_>>();
                     insert_t_all_rows(df, table_name, db, &col_names).await?;
                 } else {
                     insert_all_rows(df, table_name, db).await?;
@@ -301,7 +304,10 @@ async fn ensure_table_from_parquet_core(
 // Schema → Columns helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn get_postgresql_columns(schema: &Schema, optional_columns: &[String]) -> Result<Vec<PostgresSqlColumn>> {
+fn get_postgresql_columns(
+    schema: &Schema,
+    optional_columns: &[String],
+) -> Result<Vec<PostgresSqlColumn>> {
     schema
         .fields()
         .iter()
@@ -309,16 +315,22 @@ fn get_postgresql_columns(schema: &Schema, optional_columns: &[String]) -> Resul
             let is_optional = optional_columns.contains(field.name());
             Ok(PostgresSqlColumn {
                 column_name: field.name().to_string(),
-                sql_type: pg_type_from_arrow(field.data_type()).parse().map_err(|e: String| {
-                    anyhow::anyhow!("invalid mapped pg type for {}: {e}", field.name())
-                })?,
+                sql_type: pg_type_from_arrow(field.data_type())
+                    .parse()
+                    .map_err(|e: String| {
+                        anyhow::anyhow!("invalid mapped pg type for {}: {e}", field.name())
+                    })?,
                 nullable: is_optional,
             })
         })
         .collect()
 }
 
-fn get_t_postgresql_columns(schema: &Schema, column_names: Vec<String>, optional_columns: &[String]) -> Result<Vec<PostgresSqlColumn>> {
+fn get_t_postgresql_columns(
+    schema: &Schema,
+    column_names: Vec<String>,
+    optional_columns: &[String],
+) -> Result<Vec<PostgresSqlColumn>> {
     let base = get_postgresql_columns(schema, optional_columns)?;
     if (column_names.len() + 1) != base.len() {
         bail!(
@@ -373,7 +385,11 @@ fn pg_type_from_arrow(dtype: &DataType) -> &'static str {
 // — SQL helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn build_create_table_sql(table_name: &str, columns: &[PostgresSqlColumn], unique_columns: &[String]) -> Result<String> {
+fn build_create_table_sql(
+    table_name: &str,
+    columns: &[PostgresSqlColumn],
+    unique_columns: &[String],
+) -> Result<String> {
     if columns.is_empty() {
         bail!("Parquet file has no columns");
     }
@@ -389,7 +405,13 @@ fn build_create_table_sql(table_name: &str, columns: &[PostgresSqlColumn], uniqu
             let is_unique = unique_columns.contains(&c.column_name);
             let unique_suffix = if is_unique { " UNIQUE" } else { "" };
             let nullability = if c.nullable { "" } else { " NOT NULL" };
-            format!("{} {}{}{}", qident(&c.column_name), c.sql_type, nullability, unique_suffix)
+            format!(
+                "{} {}{}{}",
+                qident(&c.column_name),
+                c.sql_type,
+                nullability,
+                unique_suffix
+            )
         })
         .collect::<Vec<_>>()
         .join(",\n  ");
@@ -531,7 +553,6 @@ async fn insert_t_all_rows(
     Ok(())
 }
 
-
 // Bind Arrow value at `idx` to the SQL query builder
 fn bind_arrow_value(
     qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
@@ -547,56 +568,64 @@ fn bind_arrow_value(
 
     match array.data_type() {
         Int64 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Int64Array"))?
                 .value(idx);
             qb.push_bind(v);
         }
         Int32 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<Int32Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Int32Array"))?
                 .value(idx);
             qb.push_bind(v);
         }
         Float64 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Float64Array"))?
                 .value(idx);
             qb.push_bind(v);
         }
         Float32 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<Float32Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Float32Array"))?
                 .value(idx) as f64;
             qb.push_bind(v);
         }
         Boolean => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| anyhow::anyhow!("Expected BooleanArray"))?
                 .value(idx);
             qb.push_bind(v);
         }
         Utf8 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| anyhow::anyhow!("Expected StringArray"))?
                 .value(idx);
             qb.push_bind(v);
         }
         LargeUtf8 => {
-            let v = array.as_any()
+            let v = array
+                .as_any()
                 .downcast_ref::<LargeStringArray>()
                 .ok_or_else(|| anyhow::anyhow!("Expected LargeStringArray"))?
                 .value(idx);
             qb.push_bind(v);
         }
         Date32 => {
-            let days = array.as_any()
+            let days = array
+                .as_any()
                 .downcast_ref::<Date32Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Date32Array"))?
                 .value(idx);
@@ -606,7 +635,8 @@ fn bind_arrow_value(
             qb.push_bind(date.format("%Y-%m-%d").to_string());
         }
         Date64 => {
-            let ms = array.as_any()
+            let ms = array
+                .as_any()
                 .downcast_ref::<Date64Array>()
                 .ok_or_else(|| anyhow::anyhow!("Expected Date64Array"))?
                 .value(idx);
@@ -618,7 +648,8 @@ fn bind_arrow_value(
         Timestamp(unit, _) => {
             let s = match unit {
                 TimeUnit::Second => {
-                    let v = array.as_any()
+                    let v = array
+                        .as_any()
                         .downcast_ref::<TimestampSecondArray>()
                         .ok_or_else(|| anyhow::anyhow!("Expected TimestampSecondArray"))?
                         .value(idx);
@@ -628,7 +659,8 @@ fn bind_arrow_value(
                         .to_string()
                 }
                 TimeUnit::Millisecond => {
-                    let v = array.as_any()
+                    let v = array
+                        .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .ok_or_else(|| anyhow::anyhow!("Expected TimestampMillisecondArray"))?
                         .value(idx);
@@ -638,7 +670,8 @@ fn bind_arrow_value(
                         .to_string()
                 }
                 TimeUnit::Microsecond => {
-                    let v = array.as_any()
+                    let v = array
+                        .as_any()
                         .downcast_ref::<TimestampMicrosecondArray>()
                         .ok_or_else(|| anyhow::anyhow!("Expected TimestampMicrosecondArray"))?
                         .value(idx);
@@ -650,7 +683,8 @@ fn bind_arrow_value(
                         .to_string()
                 }
                 TimeUnit::Nanosecond => {
-                    let v = array.as_any()
+                    let v = array
+                        .as_any()
                         .downcast_ref::<TimestampNanosecondArray>()
                         .ok_or_else(|| anyhow::anyhow!("Expected TimestampNanosecondArray"))?
                         .value(idx);
@@ -868,7 +902,10 @@ mod tests {
     #[test]
     fn arrow_to_pg_type_unmapped_types_fall_back_to_text() {
         assert_eq!(pg_type_from_arrow(&DataType::Decimal128(10, 2)), "TEXT");
-        assert_eq!(pg_type_from_arrow(&DataType::Time64(TimeUnit::Microsecond)), "TEXT");
+        assert_eq!(
+            pg_type_from_arrow(&DataType::Time64(TimeUnit::Microsecond)),
+            "TEXT"
+        );
         assert_eq!(
             pg_type_from_arrow(&DataType::List(Arc::new(Field::new(
                 "item",
@@ -895,7 +932,9 @@ mod tests {
             DataType::Timestamp(TimeUnit::Second, None),
             DataType::Decimal128(10, 2),
         ] {
-            assert!(pg_type_from_arrow(&dt).parse::<PostgreSqlColumnType>().is_ok());
+            assert!(pg_type_from_arrow(&dt)
+                .parse::<PostgreSqlColumnType>()
+                .is_ok());
         }
     }
 
@@ -925,8 +964,14 @@ mod tests {
             ("b", DataType::Int64, false), // Arrow says required
         ]);
         let cols = get_postgresql_columns(&schema, &["b".to_string()]).unwrap();
-        assert!(!cols[0].nullable, "arrow-nullable 'a' should still be NOT NULL");
-        assert!(cols[1].nullable, "'b' is nullable only because it is listed");
+        assert!(
+            !cols[0].nullable,
+            "arrow-nullable 'a' should still be NOT NULL"
+        );
+        assert!(
+            cols[1].nullable,
+            "'b' is nullable only because it is listed"
+        );
     }
 
     #[test]
@@ -939,7 +984,9 @@ mod tests {
 
     #[test]
     fn postgresql_columns_empty_schema_yields_no_columns() {
-        assert!(get_postgresql_columns(&Schema::empty(), &[]).unwrap().is_empty());
+        assert!(get_postgresql_columns(&Schema::empty(), &[])
+            .unwrap()
+            .is_empty());
     }
 
     // ── get_t_postgresql_columns ──────────────────────────────────────────────
@@ -957,7 +1004,10 @@ mod tests {
         let names = vec!["qty".to_string(), "price".to_string(), "label".to_string()];
         let cols = get_t_postgresql_columns(&schema, names, &[]).unwrap();
 
-        let got: Vec<(&str, &str)> = cols.iter().map(|c| (c.column_name.as_str(), ty(c))).collect();
+        let got: Vec<(&str, &str)> = cols
+            .iter()
+            .map(|c| (c.column_name.as_str(), ty(c)))
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -975,8 +1025,8 @@ mod tests {
             ("ignored", DataType::Int64, false),
             ("f1", DataType::Int32, false),
         ]);
-        let cols =
-            get_t_postgresql_columns(&schema, vec!["qty".to_string()], &["c0".to_string()]).unwrap();
+        let cols = get_t_postgresql_columns(&schema, vec!["qty".to_string()], &["c0".to_string()])
+            .unwrap();
         assert_eq!(cols[0].column_name, "c0");
         assert_eq!(ty(&cols[0]), "TEXT");
         assert!(
@@ -992,12 +1042,9 @@ mod tests {
             ("f1", DataType::Int32, false),
         ]);
 
-        let by_new = get_t_postgresql_columns(
-            &schema,
-            vec!["amount".to_string()],
-            &["amount".to_string()],
-        )
-        .unwrap();
+        let by_new =
+            get_t_postgresql_columns(&schema, vec!["amount".to_string()], &["amount".to_string()])
+                .unwrap();
         assert!(by_new[1].nullable);
 
         let by_parquet =
@@ -1026,13 +1073,9 @@ mod tests {
 
     #[test]
     fn t_columns_reject_too_many_names() {
-        let schema = schema_of(&[
-            ("a", DataType::Int64, false),
-            ("b", DataType::Int64, false),
-        ]);
-        let err =
-            get_t_postgresql_columns(&schema, vec!["x".into(), "y".into(), "z".into()], &[])
-                .unwrap_err();
+        let schema = schema_of(&[("a", DataType::Int64, false), ("b", DataType::Int64, false)]);
+        let err = get_t_postgresql_columns(&schema, vec!["x".into(), "y".into(), "z".into()], &[])
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "Expected 4 columns, got 2 (t_mode expects parquet to have 1 extra leading column)"
@@ -1092,7 +1135,10 @@ mod tests {
     fn create_table_sql_honours_an_explicit_schema() {
         let cols = vec![col("c1", PostgreSqlColumnType::Text, false)];
         let sql = build_create_table_sql("myschema.t", &cols, &[]).unwrap();
-        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"myschema\".\"t\" ("), "{sql}");
+        assert!(
+            sql.starts_with("CREATE TABLE IF NOT EXISTS \"myschema\".\"t\" ("),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -1101,7 +1147,10 @@ mod tests {
         // table identifier "b.c", not a three-part name.
         let cols = vec![col("c1", PostgreSqlColumnType::Text, false)];
         let sql = build_create_table_sql("a.b.c", &cols, &[]).unwrap();
-        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"a\".\"b.c\" ("), "{sql}");
+        assert!(
+            sql.starts_with("CREATE TABLE IF NOT EXISTS \"a\".\"b.c\" ("),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -1150,7 +1199,10 @@ mod tests {
     #[test]
     fn parquet_part_path_inserts_the_shard_suffix() {
         assert_eq!(parquet_part_path("data.parquet", 0), "data_xyz0.parquet");
-        assert_eq!(parquet_part_path("/x/data.parquet", 12), "/x/data_xyz12.parquet");
+        assert_eq!(
+            parquet_part_path("/x/data.parquet", 12),
+            "/x/data_xyz12.parquet"
+        );
     }
 
     #[test]
@@ -1206,11 +1258,20 @@ mod tests {
     fn bind_supported_scalar_types() {
         assert_eq!(bind_one(&Int64Array::from(vec![7i64]), 0).unwrap(), "$1");
         assert_eq!(bind_one(&Int32Array::from(vec![7i32]), 0).unwrap(), "$1");
-        assert_eq!(bind_one(&Float64Array::from(vec![1.5f64]), 0).unwrap(), "$1");
-        assert_eq!(bind_one(&Float32Array::from(vec![1.5f32]), 0).unwrap(), "$1");
+        assert_eq!(
+            bind_one(&Float64Array::from(vec![1.5f64]), 0).unwrap(),
+            "$1"
+        );
+        assert_eq!(
+            bind_one(&Float32Array::from(vec![1.5f32]), 0).unwrap(),
+            "$1"
+        );
         assert_eq!(bind_one(&BooleanArray::from(vec![true]), 0).unwrap(), "$1");
         assert_eq!(bind_one(&StringArray::from(vec!["x"]), 0).unwrap(), "$1");
-        assert_eq!(bind_one(&LargeStringArray::from(vec!["x"]), 0).unwrap(), "$1");
+        assert_eq!(
+            bind_one(&LargeStringArray::from(vec!["x"]), 0).unwrap(),
+            "$1"
+        );
     }
 
     #[test]
