@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://codcel.io">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/codcel-logo-lockup-dark.svg">
-      <img src="assets/codcel-logo-lockup.svg" alt="Codcel" width="320">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/codcel-io/codcel-postgresql-engine/refs/tags/release-0.1.9/assets/codcel-logo-lockup-dark.svg">
+      <img src="https://raw.githubusercontent.com/codcel-io/codcel-postgresql-engine/refs/tags/release-0.1.9/assets/codcel-logo-lockup.svg" alt="Codcel" width="320">
     </picture>
   </a>
 </p>
@@ -11,11 +11,11 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
 
-PostgreSQL table engine for Codcel — full CRUD and Excel-like lookups backed by PostgreSQL, with connection pooling and parameterized queries.
+PostgreSQL table engine for Codcel — full CRUD and Excel-like lookups backed by PostgreSQL, with connection pooling and prepared-statement writes.
 
 ## Overview
 
-Codcel PostgreSQL Engine implements the [`CodcelTable`](https://github.com/codcel-io/codcel-table-engine) trait for PostgreSQL databases. It provides Excel-compatible lookup operations alongside full CRUD support, with production-ready connection pooling, pre-built query templates, and parameterized queries for SQL safety. Tables can be initialized directly from Parquet file schemas.
+Codcel PostgreSQL Engine implements the [`CodcelTable`](https://github.com/codcel-io/codcel-table-engine) trait for PostgreSQL databases. It provides Excel-compatible lookup operations alongside full CRUD support, with production-ready connection pooling, pre-built query templates, and prepared-statement writes. Lookup and filter paths build SQL through a condition builder that validates identifiers and escapes literals. Tables can be initialized directly from Parquet file schemas.
 
 This is one of the open-source components of [Codcel](https://codcel.io). Codcel converts your Excel spreadsheets into clean, human-readable source code — in Rust, Python, Java, C#, TypeScript, Go, Swift, and more. You get the full source code, and this engine is part of what you get: your generated projects use it directly for production-ready database access — all in transparent, inspectable Rust.
 
@@ -25,7 +25,7 @@ This is one of the open-source components of [Codcel](https://codcel.io). Codcel
 - **Full CRUD** — add, read, update, and delete rows with UUID-based IDs
 - **Table initialization from Parquet** — create PostgreSQL tables from Parquet file schemas with optional data import
 - **Connection pooling** — sqlx PgPool with configurable pool sizes, timeouts, and connection lifetimes
-- **Parameterized queries** — all user values use bind parameters; no string interpolation
+- **Prepared-statement writes** — CRUD operations bind all user values as query parameters
 - **Pre-built query templates** — common operations use pre-computed SQL for reduced allocations
 - **9 PostgreSQL types** — Integer, BigInt, Real, DoublePrecision, Boolean, Text, Bytea, Date, Timestamp
 
@@ -35,7 +35,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-codcel-postgresql-engine = { git = "https://github.com/codcel-io/codcel-postgresql-engine.git", branch = "main" }
+codcel-postgresql-engine = "0.1.9"
 ```
 
 Initialize a table:
