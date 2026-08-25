@@ -1,6 +1,6 @@
 [package]
 name = "codcel-postgresql-engine"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 rust-version = "1.94"
 authors = ["Codcel <support@codcel.io>"]

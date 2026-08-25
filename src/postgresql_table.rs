@@ -3453,6 +3453,7 @@ mod tests {
             use_excel_rounding: false,
             language: "en".to_string(),
             allow_lotus_1_2_3_1900_date_bug: true,
+            ..Default::default()
         }
     }
 
