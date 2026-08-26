@@ -13,6 +13,7 @@ keywords = ["excel", "spreadsheet", "postgres", "postgresql", "sqlx"]
 categories = ["database", "asynchronous"]
 include = [
     "src/**/*.rs",
+    "clippy.toml",
     "README.md",
     "CONTRIBUTING.md",
     "LICENSE-MIT",
@@ -35,3 +36,8 @@ uuid = { version = "1.24.0", features = ["v4"] }
 whoami = "2.1.2"
 log = "0.4.33"
 futures = "0.3.33"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

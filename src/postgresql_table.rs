@@ -189,7 +189,7 @@ impl PostgreSQLTable {
                 // Parameterized table function: *P*template_name:const1:const2:...
                 if let Some(ref param_map) = table_functions.param_functions {
                     let mut parts = func_name.splitn(2, ':');
-                    let template_name = parts.next().unwrap();
+                    let template_name = parts.next().unwrap_or("");
                     let constants_str = parts.next().unwrap_or("");
                     let params: Vec<Value> = constants_str
                         .split(':')
@@ -1924,8 +1924,8 @@ impl CodcelTable for PostgreSQLTable {
                 // Define helper to adjust ordering
                 let adjust_order_f64 = |vals: &mut Vec<f64>| match search_mode {
                     -1 => vals.reverse(),
-                    2 => vals.sort_by(|a, b| a.partial_cmp(b).unwrap()),
-                    -2 => vals.sort_by(|a, b| b.partial_cmp(a).unwrap()),
+                    2 => vals.sort_by(|a, b| a.total_cmp(b)),
+                    -2 => vals.sort_by(|a, b| b.total_cmp(a)),
                     _ => {}
                 };
                 let adjust_order_i32 = |vals: &mut Vec<i32>| match search_mode {
@@ -2382,8 +2382,8 @@ impl CodcelTable for PostgreSQLTable {
                     .collect();
                 match sm {
                     -1 => vals.reverse(),
-                    2 => vals.sort_by(|a, b| a.partial_cmp(b).unwrap()),
-                    -2 => vals.sort_by(|a, b| b.partial_cmp(a).unwrap()),
+                    2 => vals.sort_by(|a, b| a.total_cmp(b)),
+                    -2 => vals.sort_by(|a, b| b.total_cmp(a)),
                     _ => {}
                 }
                 let col = &vals as &dyn Searchable;
@@ -2427,8 +2427,8 @@ impl CodcelTable for PostgreSQLTable {
                     .collect();
                 match sm {
                     -1 => vals.reverse(),
-                    2 => vals.sort_by(|a, b| a.partial_cmp(b).unwrap()),
-                    -2 => vals.sort_by(|a, b| b.partial_cmp(a).unwrap()),
+                    2 => vals.sort_by(|a, b| a.total_cmp(b)),
+                    -2 => vals.sort_by(|a, b| b.total_cmp(a)),
                     _ => {}
                 }
                 let col = &vals as &dyn Searchable;
@@ -3453,7 +3453,6 @@ mod tests {
             use_excel_rounding: false,
             language: "en".to_string(),
             allow_lotus_1_2_3_1900_date_bug: true,
-            ..Default::default()
         }
     }
 
