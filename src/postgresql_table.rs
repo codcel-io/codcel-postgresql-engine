@@ -3445,14 +3445,15 @@ mod tests {
 
     /// A fixed `ValueFormat` built by struct literal rather than `from_system_with_env`,
     /// so the tests do not depend on the host locale or on `CODCEL_*` environment variables.
+    ///
+    /// The one departure from the default is the empty currency symbol. Spelled
+    /// as `..Default::default()` rather than an exhaustive field list so that
+    /// adding a field to `ValueFormat` upstream cannot break this; `Default` is
+    /// itself a plain literal, so the host-independence above still holds.
     fn vf() -> ValueFormat {
         ValueFormat {
-            decimal_separator: ".".to_string(),
             currency_symbol: String::new(),
-            thousands_separator: ",".to_string(),
-            use_excel_rounding: false,
-            language: "en".to_string(),
-            allow_lotus_1_2_3_1900_date_bug: true,
+            ..Default::default()
         }
     }
 
