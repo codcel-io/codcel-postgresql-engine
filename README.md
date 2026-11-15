@@ -36,7 +36,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-codcel-postgresql-engine = "0.1.9"
+codcel-postgresql-engine = "0.1.10"
 ```
 
 Initialize a table:
